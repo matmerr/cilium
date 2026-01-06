@@ -320,7 +320,10 @@ func (d *Daemon) allocateHealthIPs() error {
 
 func (d *Daemon) allocateIngressIPs() error {
 	bootstrapStats.ingressIPAM.Start()
-	if option.Config.EnableEnvoyConfig {
+	// Skip ingress IP allocation when Gateway API uses host network mode,
+	// as ingress traffic flows directly through the host network without needing
+	// dedicated ingress IPs.
+	if option.Config.EnableEnvoyConfig && !option.Config.GatewayAPIHostnetworkEnabled {
 		if option.Config.EnableIPv4 {
 			var result *ipam.AllocationResult
 			var err error

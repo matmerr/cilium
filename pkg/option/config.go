@@ -324,6 +324,9 @@ const (
 	// EnableEnvoyConfig enables processing of CiliumClusterwideEnvoyConfig and CiliumEnvoyConfig CRDs
 	EnableEnvoyConfig = "enable-envoy-config"
 
+	// GatewayAPIHostnetworkEnabled exposes Gateway listeners on the host network
+	GatewayAPIHostnetworkEnabled = "gateway-api-hostnetwork-enabled"
+
 	// IPMasqAgentConfigPath is the configuration file path
 	IPMasqAgentConfigPath = "ip-masq-agent-config-path"
 
@@ -1528,20 +1531,21 @@ type DaemonConfig struct {
 	EnableIPMasqAgent           bool
 	IPMasqAgentConfigPath       string
 
-	EnableBPFClockProbe    bool
-	EnableEgressGateway    bool
-	EnableEnvoyConfig      bool
-	InstallIptRules        bool
-	MonitorAggregation     string
-	PreAllocateMaps        bool
-	IPv6NodeAddr           string
-	IPv4NodeAddr           string
-	SocketPath             string
-	TracePayloadlen        int
-	TracePayloadlenOverlay int
-	Version                string
-	PrometheusServeAddr    string
-	ToFQDNsMinTTL          int
+	EnableBPFClockProbe          bool
+	EnableEgressGateway          bool
+	EnableEnvoyConfig            bool
+	GatewayAPIHostnetworkEnabled bool
+	InstallIptRules              bool
+	MonitorAggregation           string
+	PreAllocateMaps              bool
+	IPv6NodeAddr                 string
+	IPv4NodeAddr                 string
+	SocketPath                   string
+	TracePayloadlen              int
+	TracePayloadlenOverlay       int
+	Version                      string
+	PrometheusServeAddr          string
+	ToFQDNsMinTTL                int
 
 	// DNSMaxIPsPerRestoredRule defines the maximum number of IPs to maintain
 	// for each FQDN selector in endpoint's restored DNS rules
@@ -2675,6 +2679,7 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.EnableIPMasqAgent = vp.GetBool(EnableIPMasqAgent)
 	c.EnableEgressGateway = vp.GetBool(EnableEgressGateway) || vp.GetBool(EnableIPv4EgressGateway)
 	c.EnableEnvoyConfig = vp.GetBool(EnableEnvoyConfig)
+	c.GatewayAPIHostnetworkEnabled = vp.GetBool(GatewayAPIHostnetworkEnabled)
 	c.IPMasqAgentConfigPath = vp.GetString(IPMasqAgentConfigPath)
 	c.AgentHealthRequireK8sConnectivity = vp.GetBool(AgentHealthRequireK8sConnectivity)
 	c.InstallIptRules = vp.GetBool(InstallIptRules)
@@ -3203,9 +3208,9 @@ func (c *DaemonConfig) checkIPAMDelegatedPlugin() error {
 		}
 		// envoy config (Ingress, Gateway API, ...) require cilium-agent to create an IP address
 		// specifically for differentiating envoy traffic, which is not possible
-		// with delegated IPAM.
-		if c.EnableEnvoyConfig {
-			return fmt.Errorf("--%s must be disabled with --%s=%s", EnableEnvoyConfig, IPAM, ipamOption.IPAMDelegatedPlugin)
+		// with delegated IPAM unless Gateway API is using host network mode.
+		if c.EnableEnvoyConfig && !c.GatewayAPIHostnetworkEnabled {
+			return fmt.Errorf("--%s must be disabled with --%s=%s (unless --%s is enabled)", EnableEnvoyConfig, IPAM, ipamOption.IPAMDelegatedPlugin, GatewayAPIHostnetworkEnabled)
 		}
 	}
 	return nil

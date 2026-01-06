@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: default
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: echo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: echo
+  template:
+    metadata:
+      labels:
+        app: echo
+    spec:
+      containers:
+      - name: agnhost
+        image: registry.k8s.io/e2e-test-images/agnhost:2.40
+        args:
+        - netexec
+        - --http-port=8080
+        ports:
+        - containerPort: 8080

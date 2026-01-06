@@ -591,6 +591,9 @@ func InitGlobalFlags(logger *slog.Logger, cmd *cobra.Command, vp *viper.Viper) {
 	flags.Bool(option.EnableEnvoyConfig, false, "Enable Envoy Config CRDs")
 	option.BindEnv(vp, option.EnableEnvoyConfig)
 
+	flags.Bool(option.GatewayAPIHostnetworkEnabled, false, "Exposes Gateway listeners on the host network")
+	option.BindEnv(vp, option.GatewayAPIHostnetworkEnabled)
+
 	flags.String(option.IPMasqAgentConfigPath, "/etc/config/ip-masq-agent", "ip-masq-agent configuration file path")
 	option.BindEnv(vp, option.IPMasqAgentConfigPath)
 
@@ -1567,7 +1570,10 @@ func startDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *da
 		}
 	}
 
-	if option.Config.EnableEnvoyConfig {
+	// Skip ingress endpoint creation when Gateway API uses host network mode,
+	// as ingress traffic flows directly through the host network without needing
+	// dedicated ingress IPs or endpoints.
+	if option.Config.EnableEnvoyConfig && !option.Config.GatewayAPIHostnetworkEnabled {
 		if !d.endpointManager.IngressEndpointExists() {
 			// Creating Ingress Endpoint depends on the Ingress IPs having been
 			// allocated first. This happens earlier in the agent bootstrap.
