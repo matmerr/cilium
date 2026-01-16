@@ -3201,12 +3201,9 @@ func (c *DaemonConfig) checkIPAMDelegatedPlugin() error {
 		if c.EnableEndpointHealthChecking {
 			return fmt.Errorf("--%s must be disabled with --%s=%s", EnableEndpointHealthChecking, IPAM, ipamOption.IPAMDelegatedPlugin)
 		}
-		// envoy config (Ingress, Gateway API, ...) require cilium-agent to create an IP address
-		// specifically for differentiating envoy traffic, which is not possible
-		// with delegated IPAM.
-		if c.EnableEnvoyConfig {
-			return fmt.Errorf("--%s must be disabled with --%s=%s", EnableEnvoyConfig, IPAM, ipamOption.IPAMDelegatedPlugin)
-		}
+		// NOTE: EnableEnvoyConfig (Ingress, Gateway API) is now supported with delegated IPAM.
+		// The ingress IP will be allocated by calling the delegated IPAM plugin directly from
+		// the daemon. See daemon/cmd/ipam.go allocateIPWithDelegatedIPAM().
 	}
 	return nil
 }
