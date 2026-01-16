@@ -1,26 +1,61 @@
 #!/bin/bash
+# Test Gateway API connectivity
+set -e
 
-echo "Testing Gateway API..."
-echo
+NAMESPACE="${NAMESPACE:-kube-system}"
 
-GATEWAY_IP=$(kubectl get svc cilium-gateway-my-gateway -n default -o jsonpath='{.spec.loadBalancer.ingress[0].ip}')
-echo "Gateway LoadBalancer IP: $GATEWAY_IP"
-echo
+echo "================================================"
+echo "Gateway API Connectivity Test"
+echo "================================================"
 
-echo "Testing agnhost netexec endpoints:"
-echo
+# Get Gateway service IP
+GATEWAY_SVC="cilium-gateway-bookinfo-gateway"
+GATEWAY_IP=$(kubectl get svc "${GATEWAY_SVC}" -n "${NAMESPACE}" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
 
-echo "1. Test /hostname endpoint:"
-curl --max-time 5 http://${GATEWAY_IP}/hostname 2>&1 || echo "Failed to connect"
-echo
+if [ -z "$GATEWAY_IP" ]; then
+    echo "ERROR: Gateway service not found. Looking for available gateways..."
+    kubectl get svc -n "${NAMESPACE}" | grep gateway
+    exit 1
+fi
 
-echo "2. Test root endpoint (returns timestamp):"
-curl --max-time 5 http://${GATEWAY_IP}/ 2>&1 || echo "Failed to connect"
-echo
+echo "Gateway Service: ${GATEWAY_SVC}"
+echo "Gateway ClusterIP: ${GATEWAY_IP}:8080"
+echo ""
 
-echo "3. Test /clientip endpoint:"
-curl --max-time 5 http://${GATEWAY_IP}/clientip 2>&1 || echo "Failed to connect"
-echo
+# Test 1: Direct service (should work)
+echo ">>> Test 1: Direct service access (productpage:9080)"
+DIRECT_RESULT=$(kubectl run test-direct-$$ --rm -i --restart=Never --image=curlimages/curl -- \
+    curl -s -o /dev/null -w "%{http_code}" http://productpage.${NAMESPACE}:9080/productpage 2>/dev/null || echo "FAILED")
+echo "Result: HTTP ${DIRECT_RESULT}"
+if [ "$DIRECT_RESULT" = "200" ]; then
+    echo "✅ Direct service is healthy"
+else
+    echo "❌ Direct service FAILED"
+fi
+echo ""
 
-echo "Note: If all tests fail, the Gateway may not be properly configured."
-echo "Check the status with: cd ~/cilium-gateway-testbed && ./status.sh"
+# Test 2: Gateway (may return 500 due to known issue)
+echo ">>> Test 2: Gateway access (${GATEWAY_IP}:8080)"
+GATEWAY_RESULT=$(kubectl run test-gateway-$$ --rm -i --restart=Never --image=curlimages/curl -- \
+    curl -s -o /dev/null -w "%{http_code}" http://${GATEWAY_IP}:8080/productpage 2>/dev/null || echo "FAILED")
+echo "Result: HTTP ${GATEWAY_RESULT}"
+if [ "$GATEWAY_RESULT" = "200" ]; then
+    echo "✅ Gateway is working"
+else
+    echo "❌ Gateway returned ${GATEWAY_RESULT}"
+    echo ""
+    echo "NOTE: HTTP 500 is expected due to known issue:"
+    echo "  Envoy in hostNetwork cannot reach Azure CNI pod IPs"
+fi
+echo ""
+
+# Summary
+echo "================================================"
+echo "Summary"
+echo "================================================"
+echo "Direct Service: HTTP ${DIRECT_RESULT}"
+echo "Gateway/Envoy:  HTTP ${GATEWAY_RESULT}"
+echo ""
+if [ "$GATEWAY_RESULT" = "500" ] && [ "$DIRECT_RESULT" = "200" ]; then
+    echo "Known Issue: hostNetwork Envoy cannot route to Azure CNI pods"
+fi

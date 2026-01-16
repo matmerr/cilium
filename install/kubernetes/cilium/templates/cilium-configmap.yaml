@@ -302,6 +302,12 @@ data:
   gateway-api-hostnetwork-nodelabelselector: {{ include "mapToString" .Values.gatewayAPI.hostNetwork.nodes.matchLabels | quote }}
 {{- end }}
 
+{{- /* Enable external-envoy-proxy-pod-network when envoy DaemonSet runs without hostNetwork */ -}}
+{{- $envoyDS := eq (include "envoyDaemonSetEnabled" .) "true" -}}
+{{- if and $envoyDS (not .Values.envoy.hostNetwork) }}
+  external-envoy-proxy-pod-network: "true"
+{{- end }}
+
 {{- if and $readSecretsOnlyFromSecretsNamespace $secretSyncEnabled }}
   enable-policy-secrets-sync: "true"
 {{- end }}

@@ -689,7 +689,7 @@ func TestCheckIPAMDelegatedPlugin(t *testing.T) {
 				IPAM:              ipamOption.IPAMDelegatedPlugin,
 				EnableEnvoyConfig: true,
 			},
-			expectErr: fmt.Errorf("--enable-envoy-config must be disabled with --ipam=delegated-plugin (unless --gateway-api-hostnetwork-enabled is enabled)"),
+			expectErr: fmt.Errorf("--enable-envoy-config must be disabled with --ipam=delegated-plugin (unless --gateway-api-hostnetwork-enabled or --external-envoy-proxy-pod-network is enabled)"),
 		},
 		{
 			name: "IPAMDelegatedPlugin with envoy config and host network enabled",
@@ -700,6 +700,15 @@ func TestCheckIPAMDelegatedPlugin(t *testing.T) {
 			},
 			expectErr: nil,
 		},
+		{
+			name: "IPAMDelegatedPlugin with envoy config and external envoy pod network enabled",
+			d: &DaemonConfig{
+				IPAM:                         ipamOption.IPAMDelegatedPlugin,
+				EnableEnvoyConfig:            true,
+				ExternalEnvoyProxyPodNetwork: true,
+			},
+			expectErr: nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -707,6 +716,8 @@ func TestCheckIPAMDelegatedPlugin(t *testing.T) {
 			err := tt.d.checkIPAMDelegatedPlugin()
 			if tt.expectErr != nil && err == nil {
 				t.Errorf("expected error but got none")
+			} else if tt.expectErr == nil && err != nil {
+				t.Errorf("expected no error but got %q", err)
 			} else if tt.expectErr != nil && tt.expectErr.Error() != err.Error() {
 				t.Errorf("expected error %q but got %q", tt.expectErr, err)
 			}

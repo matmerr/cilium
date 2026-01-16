@@ -1570,10 +1570,13 @@ func startDaemon(d *Daemon, restoredEndpoints *endpointRestoreState, cleaner *da
 		}
 	}
 
-	// Skip ingress endpoint creation when Gateway API uses host network mode,
-	// as ingress traffic flows directly through the host network without needing
-	// dedicated ingress IPs or endpoints.
-	if option.Config.EnableEnvoyConfig && !option.Config.GatewayAPIHostnetworkEnabled {
+	// Skip ingress endpoint creation when:
+	// 1. Gateway API uses host network mode (traffic flows through host network), OR
+	// Create ingress endpoint when:
+	// 1. Envoy config is enabled AND
+	// 2. We have ingress IPs available (either allocated from IPAM or using node IP in host network mode)
+	// Skip only when external Envoy proxy runs in pod network (uses its own pod IP)
+	if option.Config.EnableEnvoyConfig && !option.Config.ExternalEnvoyProxyPodNetwork {
 		if !d.endpointManager.IngressEndpointExists() {
 			// Creating Ingress Endpoint depends on the Ingress IPs having been
 			// allocated first. This happens earlier in the agent bootstrap.

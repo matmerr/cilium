@@ -189,11 +189,9 @@ func (t *gatewayAPITranslator) toServicePorts(ports []uint32) []corev1.ServicePo
 }
 
 // toServiceType returns the ServiceType from the given Service object.
-// If hostNetwork is enabled, it returns ServiceTypeClusterIP. The default value is ServiceTypeLoadBalancer.
+// Default value is ServiceTypeLoadBalancer, which works for both hostNetwork and non-hostNetwork modes.
+// In hostNetwork mode, the LoadBalancer still routes traffic to nodes where Envoy binds to the host port.
 func (t *gatewayAPITranslator) toServiceType(params *model.Service) corev1.ServiceType {
-	if t.cfg.HostNetworkConfig.Enabled {
-		return corev1.ServiceTypeClusterIP
-	}
 	if params == nil {
 		return corev1.ServiceTypeLoadBalancer
 	}
@@ -201,11 +199,12 @@ func (t *gatewayAPITranslator) toServiceType(params *model.Service) corev1.Servi
 }
 
 // toExternalTrafficPolicy returns the ExternalTrafficPolicy from the given Service object.
-// If hostNetwork is enabled, no external traffic policy is return.
+// If hostNetwork is enabled, use "Local" policy to ensure traffic goes to nodes running the Gateway.
 // The default value is the one from the configuration flag.
 func (t *gatewayAPITranslator) toExternalTrafficPolicy(params *model.Service) corev1.ServiceExternalTrafficPolicy {
 	if t.cfg.HostNetworkConfig.Enabled {
-		return corev1.ServiceExternalTrafficPolicy("")
+		// In hostNetwork mode, use Local to ensure traffic goes to nodes running the Gateway
+		return corev1.ServiceExternalTrafficPolicyLocal
 	}
 
 	if params == nil || len(params.ExternalTrafficPolicy) == 0 {

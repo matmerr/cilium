@@ -1,6 +1,78 @@
-# Cilium Gateway API Test Bed
+# Cilium Gateway API Hostnetwork Testbed
 
-This directory contains everything needed to set up and test Cilium's Gateway API support.
+This testbed explores running Cilium Gateway API with `hostNetwork=true` and `delegated-plugin` IPAM (Azure CNI).
+
+**Current Status**: ⚠️ Gateway accepts traffic but returns HTTP 500 due to Envoy unable to reach backend pods.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Host Network                            │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ Cilium Agent Pod (hostNetwork=true)                      │   │
+│  │   ┌────────────────────────────────────────────────────┐ │   │
+│  │   │ Embedded Envoy (listening on 0.0.0.0:8080)         │ │   │
+│  │   │   - Receives traffic via ClusterIP service         │ │   │
+│  │   │   - Cannot route to Azure CNI pod IPs ❌           │ │   │
+│  │   └────────────────────────────────────────────────────┘ │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ (HTTP 500 - no route to backend)
+┌─────────────────────────────────────────────────────────────────┐
+│                      Pod Network (Azure CNI)                    │
+│  ┌────────────┐  ┌────────────┐  ┌────────────────────────────┐ │
+│  │ productpage│  │  details   │  │ ratings, reviews (v1/v2/v3)│ │
+│  │  :9080     │  │   :9080    │  │          :9080             │ │
+│  └────────────┘  └────────────┘  └────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Configuration
+
+### Cilium ConfigMap Settings
+
+```yaml
+gateway-api-hostnetwork-enabled: "true"
+enable-gateway-api: "true"
+enable-envoy-config: "true"
+ipam: delegated-plugin
+kube-proxy-replacement: "true"
+```
+
+### Custom Cilium Image
+
+```
+acnpublic.azurecr.io/matmerr/cilium:v1.18.2-5bd307a8f6-hostnet
+```
+
+## Code Changes
+
+Three files were modified to allow `enable-envoy-config` with `delegated-plugin` IPAM when `gateway-api-hostnetwork-enabled=true`:
+
+1. **pkg/option/config.go** - Added option constant and validation bypass
+2. **daemon/cmd/daemon_main.go** - Skip ingress endpoint creation
+3. **daemon/cmd/ipam.go** - Skip ingress IP allocation
+
+## Known Issue
+
+**Problem**: HTTP 500 when accessing through Gateway
+
+**Root Cause**:
+
+- Cilium agents run with `hostNetwork=true`
+- Embedded Envoy runs in host network namespace
+- Backend pods have IPs from Azure CNI (delegated-plugin)
+- Host network namespace lacks routes to Azure CNI pod network
+- Envoy cannot reach backend pod IPs
+
+**Evidence**:
+
+```
+Direct service access:  HTTP 200 ✅
+Gateway/Envoy access:   HTTP 500 ❌
+```
 
 ## Directory Structure
 
@@ -11,48 +83,34 @@ cilium-gateway-testbed/
 ├── status.sh                    # Check status of all resources
 ├── test.sh                      # Test the Gateway
 ├── cleanup.sh                   # Clean up resources
+├── deploy-custom-build.sh       # Build and deploy custom Cilium
 ├── 01-gatewayclass.yaml        # GatewayClass definition
 ├── 02-gateway.yaml             # Gateway definition
 ├── 03-echo-app.yaml            # Sample echo application
 └── 04-httproute.yaml           # HTTPRoute configuration
 ```
 
-## Quick Start
+## Quick Commands
 
-### 1. Setup
-
-Make sure you have a kind cluster with Cilium installed, then run:
-
-```bash
-cd ~/cilium-gateway-testbed
-chmod +x *.sh
-./setup.sh
-```
-
-This will:
-- Install Gateway API CRDs
-- Enable Gateway API in Cilium
-- Deploy a sample echo application
-- Create a Gateway and HTTPRoute
-
-### 2. Check Status
+### Check Gateway Status
 
 ```bash
 ./status.sh
+# or manually:
+kubectl get gateway,httproute -A
+kubectl get svc -n kube-system | grep gateway
 ```
 
-### 3. Test
+### Test Gateway vs Direct Service
 
-```bash
+````bash
 ./test.sh
-```
-
-Or manually test with port-forward:
+# or manually:
 
 ```bash
 kubectl port-forward svc/cilium-gateway-my-gateway -n default 8080:80 &
 curl http://localhost:8080/echo
-```
+````
 
 ### 4. Cleanup
 

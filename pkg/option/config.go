@@ -324,8 +324,17 @@ const (
 	// EnableEnvoyConfig enables processing of CiliumClusterwideEnvoyConfig and CiliumEnvoyConfig CRDs
 	EnableEnvoyConfig = "enable-envoy-config"
 
-	// GatewayAPIHostnetworkEnabled exposes Gateway listeners on the host network
+	// GatewayAPIHostnetworkEnabled exposes Gateway listeners on the host network.
+	// When enabled with delegated IPAM, the node's internal IP is used as the
+	// ingress IP for BPF metadata filtering (instead of allocating from IPAM).
 	GatewayAPIHostnetworkEnabled = "gateway-api-hostnetwork-enabled"
+
+	// ExternalEnvoyProxyPodNetwork indicates that the external Envoy proxy DaemonSet
+	// runs in pod network (NOT hostNetwork). In this mode, Envoy pods get their IPs
+	// from the delegated IPAM (e.g., Azure CNI), and those IPs are used for ingress.
+	// This is an ALTERNATIVE to gateway-api-hostnetwork-enabled for delegated IPAM.
+	// Note: This is automatically set when envoy.hostNetwork=false in Helm values.
+	ExternalEnvoyProxyPodNetwork = "external-envoy-proxy-pod-network"
 
 	// IPMasqAgentConfigPath is the configuration file path
 	IPMasqAgentConfigPath = "ip-masq-agent-config-path"
@@ -1531,12 +1540,13 @@ type DaemonConfig struct {
 	EnableIPMasqAgent           bool
 	IPMasqAgentConfigPath       string
 
-	EnableBPFClockProbe          bool
-	EnableEgressGateway          bool
-	EnableEnvoyConfig            bool
-	GatewayAPIHostnetworkEnabled bool
-	InstallIptRules              bool
-	MonitorAggregation           string
+	EnableBPFClockProbe              bool
+	EnableEgressGateway              bool
+	EnableEnvoyConfig                bool
+	GatewayAPIHostnetworkEnabled     bool
+	ExternalEnvoyProxyPodNetwork     bool
+	InstallIptRules                  bool
+	MonitorAggregation               string
 	PreAllocateMaps              bool
 	IPv6NodeAddr                 string
 	IPv4NodeAddr                 string
@@ -2680,6 +2690,7 @@ func (c *DaemonConfig) Populate(logger *slog.Logger, vp *viper.Viper) {
 	c.EnableEgressGateway = vp.GetBool(EnableEgressGateway) || vp.GetBool(EnableIPv4EgressGateway)
 	c.EnableEnvoyConfig = vp.GetBool(EnableEnvoyConfig)
 	c.GatewayAPIHostnetworkEnabled = vp.GetBool(GatewayAPIHostnetworkEnabled)
+	c.ExternalEnvoyProxyPodNetwork = vp.GetBool(ExternalEnvoyProxyPodNetwork)
 	c.IPMasqAgentConfigPath = vp.GetString(IPMasqAgentConfigPath)
 	c.AgentHealthRequireK8sConnectivity = vp.GetBool(AgentHealthRequireK8sConnectivity)
 	c.InstallIptRules = vp.GetBool(InstallIptRules)
@@ -3208,9 +3219,11 @@ func (c *DaemonConfig) checkIPAMDelegatedPlugin() error {
 		}
 		// envoy config (Ingress, Gateway API, ...) require cilium-agent to create an IP address
 		// specifically for differentiating envoy traffic, which is not possible
-		// with delegated IPAM unless Gateway API is using host network mode.
-		if c.EnableEnvoyConfig && !c.GatewayAPIHostnetworkEnabled {
-			return fmt.Errorf("--%s must be disabled with --%s=%s (unless --%s is enabled)", EnableEnvoyConfig, IPAM, ipamOption.IPAMDelegatedPlugin, GatewayAPIHostnetworkEnabled)
+		// with delegated IPAM unless:
+		// 1. Gateway API is using host network mode, OR
+		// 2. External Envoy proxy runs in pod network (uses its own pod IP from delegated IPAM)
+		if c.EnableEnvoyConfig && !c.GatewayAPIHostnetworkEnabled && !c.ExternalEnvoyProxyPodNetwork {
+			return fmt.Errorf("--%s must be disabled with --%s=%s (unless --%s or --%s is enabled)", EnableEnvoyConfig, IPAM, ipamOption.IPAMDelegatedPlugin, GatewayAPIHostnetworkEnabled, ExternalEnvoyProxyPodNetwork)
 		}
 	}
 	return nil

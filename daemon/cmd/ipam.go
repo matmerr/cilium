@@ -320,10 +320,37 @@ func (d *Daemon) allocateHealthIPs() error {
 
 func (d *Daemon) allocateIngressIPs() error {
 	bootstrapStats.ingressIPAM.Start()
-	// Skip ingress IP allocation when Gateway API uses host network mode,
-	// as ingress traffic flows directly through the host network without needing
-	// dedicated ingress IPs.
-	if option.Config.EnableEnvoyConfig && !option.Config.GatewayAPIHostnetworkEnabled {
+
+	// When Gateway API uses host network mode with delegated IPAM, we can't allocate
+	// an ingress IP from IPAM. Instead, use the node's internal IP as the ingress IP.
+	// This allows BPF metadata filter to identify external traffic and policy enforcement
+	// to work correctly.
+	if option.Config.EnableEnvoyConfig && option.Config.GatewayAPIHostnetworkEnabled {
+		if option.Config.EnableIPv4 {
+			nodeIP := node.GetInternalIPv4(d.logger)
+			if nodeIP != nil {
+				node.SetIngressIPv4(nodeIP)
+				d.logger.Info(fmt.Sprintf("  Ingress IPv4 (using node IP for host network mode): %s", nodeIP))
+			} else {
+				d.logger.Warn("Unable to get node internal IPv4 for ingress in host network mode")
+			}
+		}
+		if option.Config.EnableIPv6 {
+			nodeIP := node.GetInternalIPv6(d.logger)
+			if nodeIP != nil {
+				node.SetIngressIPv6(nodeIP)
+				d.logger.Info(fmt.Sprintf("  Ingress IPv6 (using node IP for host network mode): %s", nodeIP))
+			} else {
+				d.logger.Warn("Unable to get node internal IPv6 for ingress in host network mode")
+			}
+		}
+		bootstrapStats.ingressIPAM.End(true)
+		return nil
+	}
+
+	// Skip ingress IP allocation when external Envoy proxy runs in pod network
+	// (uses its own pod IP from delegated IPAM)
+	if option.Config.EnableEnvoyConfig && !option.Config.ExternalEnvoyProxyPodNetwork {
 		if option.Config.EnableIPv4 {
 			var result *ipam.AllocationResult
 			var err error

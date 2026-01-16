@@ -228,7 +228,7 @@ spec:
       serviceAccountName: {{ .Values.serviceAccounts.envoy.name | quote }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.envoy.automount }}
       terminationGracePeriodSeconds: {{ .Values.envoy.terminationGracePeriodSeconds }}
-      hostNetwork: true
+      hostNetwork: {{ .Values.envoy.hostNetwork }}
       {{- if .Values.envoy.dnsPolicy }}
       dnsPolicy: {{ .Values.envoy.dnsPolicy }}
       {{- end }}
