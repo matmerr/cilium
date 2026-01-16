@@ -62,11 +62,16 @@ func (d *Daemon) allocateIPWithDelegatedIPAM(ctx context.Context, netConf *cnity
 	cniPath := os.Getenv("CNI_PATH")
 	if cniPath == "" {
 		// Check if host-mounted CNI binaries exist (common for containerized agents)
-		if _, err := os.Stat("/host/opt/cni/bin"); err == nil {
-			cniPath = "/host/opt/cni/bin"
+		hostCNIPath := "/host/opt/cni/bin"
+		if _, statErr := os.Stat(hostCNIPath); statErr == nil {
+			cniPath = hostCNIPath
+			d.logger.Info("Using host-mounted CNI binaries path", "path", cniPath)
 		} else {
 			cniPath = "/opt/cni/bin"
+			d.logger.Info("Using default CNI binaries path", "path", cniPath, "hostPathError", statErr)
 		}
+	} else {
+		d.logger.Info("Using CNI_PATH from environment", "path", cniPath)
 	}
 
 	containerID := fmt.Sprintf("%s-%s", ingressContainerID, owner)
@@ -76,6 +81,8 @@ func (d *Daemon) allocateIPWithDelegatedIPAM(ctx context.Context, netConf *cnity
 	os.Setenv("CNI_NETNS", "") // No network namespace for infrastructure IPs
 	os.Setenv("CNI_IFNAME", "eth0")
 	os.Setenv("CNI_PATH", cniPath)
+
+	d.logger.Info("Calling delegated IPAM for ingress IP", "cniPath", cniPath, "ipamType", netConf.IPAM.Type)
 
 	// Construct a minimal DaemonConfigurationStatus with node addressing info
 	conf := &models.DaemonConfigurationStatus{
