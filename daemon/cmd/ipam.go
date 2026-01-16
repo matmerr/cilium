@@ -76,9 +76,15 @@ func (d *Daemon) allocateIPWithDelegatedIPAM(ctx context.Context, netConf *cnity
 
 	containerID := fmt.Sprintf("%s-%s", ingressContainerID, owner)
 
+	// For infrastructure IPs (like ingress), we use a synthetic network namespace.
+	// Some IPAM plugins (like azure-ipam) require CNI_NETNS to be set, even though
+	// we won't actually configure any interfaces in that namespace.
+	// We use /proc/self/ns/net (the current process's netns) as a valid reference.
+	netnsPath := "/proc/self/ns/net"
+
 	os.Setenv("CNI_COMMAND", "ADD")
 	os.Setenv("CNI_CONTAINERID", containerID)
-	os.Setenv("CNI_NETNS", "") // No network namespace for infrastructure IPs
+	os.Setenv("CNI_NETNS", netnsPath)
 	os.Setenv("CNI_IFNAME", "eth0")
 	os.Setenv("CNI_PATH", cniPath)
 
