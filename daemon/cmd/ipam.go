@@ -57,9 +57,16 @@ func (d *Daemon) allocateIPWithDelegatedIPAM(ctx context.Context, netConf *cnity
 	}
 
 	// Set up CNI environment variables required by DelegateAdd
+	// When running in a container, CNI binaries are typically mounted from the host
+	// at /host/opt/cni/bin (hostPath mount), so we try that path first
 	cniPath := os.Getenv("CNI_PATH")
 	if cniPath == "" {
-		cniPath = "/opt/cni/bin"
+		// Check if host-mounted CNI binaries exist (common for containerized agents)
+		if _, err := os.Stat("/host/opt/cni/bin"); err == nil {
+			cniPath = "/host/opt/cni/bin"
+		} else {
+			cniPath = "/opt/cni/bin"
+		}
 	}
 
 	containerID := fmt.Sprintf("%s-%s", ingressContainerID, owner)
