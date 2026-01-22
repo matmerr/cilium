@@ -16,6 +16,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
+	"github.com/cilium/cilium/daemon/cmd/cni"
 	"github.com/cilium/cilium/pkg/clustermesh"
 	"github.com/cilium/cilium/pkg/controller"
 	linuxdatapath "github.com/cilium/cilium/pkg/datapath/linux"
@@ -132,7 +133,8 @@ type Daemon struct {
 	lbConfig loadbalancer.Config
 	kprCfg   kpr.KPRConfig
 
-	healthConfig healthconfig.CiliumHealthConfig
+healthConfig healthconfig.CiliumHealthConfig
+	cniConfigManager cni.CNIConfigManager
 }
 
 func (d *Daemon) init() error {
@@ -317,7 +319,8 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		kprCfg:            params.KPRConfig,
 		ciliumHealth:      params.CiliumHealth,
 		endpointAPIFence:  params.EndpointAPIFence,
-		healthConfig:      params.HealthConfig,
+healthConfig:      params.HealthConfig,
+		cniConfigManager:  params.CNIConfigManager,
 	}
 
 	// initialize endpointRestoreComplete channel as soon as possible so that subsystems

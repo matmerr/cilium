@@ -16,7 +16,6 @@ import (
 	"github.com/cilium/statedb"
 	cniInvoke "github.com/containernetworking/cni/pkg/invoke"
 	cniTypesV1 "github.com/containernetworking/cni/pkg/types/100"
-	"github.com/spf13/viper"
 
 	"github.com/cilium/cilium/pkg/cidr"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
@@ -32,7 +31,6 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/rate"
 	"github.com/cilium/cilium/pkg/time"
-	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
 )
 
 const (
@@ -446,13 +444,9 @@ func (d *Daemon) allocateIngressIPs() error {
 
 // allocateIngressIPsWithDelegatedIPAM allocates ingress IPs using the delegated IPAM plugin.
 func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
-	cniConfPath := viper.GetString(option.ReadCNIConfiguration)
-	if cniConfPath == "" {
-		return fmt.Errorf("CNI configuration path not set")
-	}
-	netConf, err := cnitypes.ReadNetConf(cniConfPath)
-	if err != nil {
-		return fmt.Errorf("failed to read CNI config: %w", err)
+	netConf := d.cniConfigManager.GetCustomNetConf()
+	if netConf == nil {
+		return fmt.Errorf("CNI configuration not available (--read-cni-conf not set)")
 	}
 	if netConf.Name == "" {
 		return fmt.Errorf("CNI config missing network name")
@@ -463,13 +457,31 @@ func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
 		return fmt.Errorf("failed to marshal CNI config: %w", err)
 	}
 
+	// Use /host/opt/cni/bin since host's CNI plugins are mounted there in the container.
+	// Fall back to CNI_PATH environment variable if set.
 	cniPath := os.Getenv("CNI_PATH")
 	if cniPath == "" {
-		cniPath = "/opt/cni/bin"
+		cniPath = "/host/opt/cni/bin"
 	}
+
+	// Create a temporary network namespace for the CNI call.
+	// The azure-ipam plugin requires a different netns than the calling process.
+	netnsPath := "/var/run/netns/cilium-ingress"
+	if err := os.MkdirAll("/var/run/netns", 0755); err != nil {
+		return fmt.Errorf("failed to create netns directory: %w", err)
+	}
+	// Create a bind mount for a new netns by touching the file and using unshare
+	if _, err := os.Stat(netnsPath); os.IsNotExist(err) {
+		f, err := os.Create(netnsPath)
+		if err != nil {
+			return fmt.Errorf("failed to create netns file: %w", err)
+		}
+		f.Close()
+	}
+
 	os.Setenv("CNI_COMMAND", "ADD")
 	os.Setenv("CNI_CONTAINERID", "cilium-ingress")
-	os.Setenv("CNI_NETNS", "/proc/self/ns/net")
+	os.Setenv("CNI_NETNS", netnsPath)
 	os.Setenv("CNI_IFNAME", "eth0")
 	os.Setenv("CNI_PATH", cniPath)
 
