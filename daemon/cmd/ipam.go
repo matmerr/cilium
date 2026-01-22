@@ -14,15 +14,16 @@ import (
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
 	"github.com/cilium/statedb"
+	cniInvoke "github.com/containernetworking/cni/pkg/invoke"
+	cniTypesV1 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/spf13/viper"
 
-	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/cidr"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	iputil "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipam"
-	delegatedipam "github.com/cilium/cilium/pkg/ipam/delegated"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -36,68 +37,7 @@ import (
 
 const (
 	mismatchRouterIPsMsg = "Mismatch of router IPs found during restoration. The Kubernetes resource contained %s, while the filesystem contained %s. Using the router IP from the filesystem. To change the router IP, specify --%s and/or --%s."
-
-	// ingressContainerID is a synthetic container ID used for ingress IP allocation
-	// via delegated IPAM plugin
-	ingressContainerID = "cilium-ingress"
 )
-
-// allocateIPWithDelegatedIPAM allocates an IP address using the delegated IPAM plugin.
-// This is used when Gateway API is enabled with delegated IPAM mode.
-// It sets up the CNI environment variables and calls the shared delegated IPAM package.
-func (d *Daemon) allocateIPWithDelegatedIPAM(ctx context.Context, netConf *cnitypes.NetConf, owner string) (*models.IPAMResponse, func(context.Context), error) {
-	if netConf == nil {
-		return nil, nil, fmt.Errorf("CNI configuration is not available")
-	}
-
-	// Serialize the CNI configuration as stdinData
-	stdinData, err := json.Marshal(netConf)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal CNI config: %w", err)
-	}
-
-	// Set up CNI environment variables required by DelegateAdd
-	// When running in a container, CNI binaries are typically mounted from the host
-	// at /host/opt/cni/bin (hostPath mount), so we try that path first
-	cniPath := os.Getenv("CNI_PATH")
-	if cniPath == "" {
-		// Check if host-mounted CNI binaries exist (common for containerized agents)
-		hostCNIPath := "/host/opt/cni/bin"
-		if _, statErr := os.Stat(hostCNIPath); statErr == nil {
-			cniPath = hostCNIPath
-			d.logger.Info("Using host-mounted CNI binaries path", "path", cniPath)
-		} else {
-			cniPath = "/opt/cni/bin"
-			d.logger.Info("Using default CNI binaries path", "path", cniPath, "hostPathError", statErr)
-		}
-	} else {
-		d.logger.Info("Using CNI_PATH from environment", "path", cniPath)
-	}
-
-	containerID := fmt.Sprintf("%s-%s", ingressContainerID, owner)
-
-	// For infrastructure IPs (like ingress), we use a synthetic network namespace.
-	// Some IPAM plugins (like azure-ipam) require CNI_NETNS to be set, even though
-	// we won't actually configure any interfaces in that namespace.
-	// We use /proc/self/ns/net (the current process's netns) as a valid reference.
-	netnsPath := "/proc/self/ns/net"
-
-	os.Setenv("CNI_COMMAND", "ADD")
-	os.Setenv("CNI_CONTAINERID", containerID)
-	os.Setenv("CNI_NETNS", netnsPath)
-	os.Setenv("CNI_IFNAME", "eth0")
-	os.Setenv("CNI_PATH", cniPath)
-
-	d.logger.Info("Calling delegated IPAM for ingress IP", "cniPath", cniPath, "ipamType", netConf.IPAM.Type)
-
-	// Construct a minimal DaemonConfigurationStatus with node addressing info
-	conf := &models.DaemonConfigurationStatus{
-		Addressing: node.GetNodeAddressing(d.logger),
-	}
-
-	// Call the shared delegated IPAM function
-	return delegatedipam.AllocateIPsWithDelegatedPlugin(ctx, conf, netConf, stdinData)
-}
 
 func (d *Daemon) allocateRouterIPv4(family types.NodeAddressingFamily, fromK8s, fromFS net.IP) (net.IP, error) {
 	if option.Config.LocalRouterIPv4 != "" {
@@ -387,155 +327,171 @@ func (d *Daemon) allocateHealthIPs() error {
 func (d *Daemon) allocateIngressIPs() error {
 	bootstrapStats.ingressIPAM.Start()
 	if option.Config.EnableEnvoyConfig {
-		// Check if we should use delegated IPAM for ingress IP allocation
-		useDelegatedIPAM := option.Config.IPAM == ipamOption.IPAMDelegatedPlugin && d.cniConfigManager != nil
+		// Use delegated IPAM for ingress IP allocation when configured
+		if option.Config.IPAM == ipamOption.IPAMDelegatedPlugin {
+			if err := d.allocateIngressIPsWithDelegatedIPAM(); err != nil {
+				d.logger.Warn("delegated IPAM for ingress failed", logfields.Error, err)
+			}
+			bootstrapStats.ingressIPAM.End(true)
+			return nil
+		}
+		if option.Config.EnableIPv4 {
+			var result *ipam.AllocationResult
+			var err error
 
-		if useDelegatedIPAM {
-			// Use delegated IPAM plugin for ingress IP allocation
-			// The delegated IPAM allocates both IPv4 and IPv6 in a single call
-			netConf := d.cniConfigManager.GetCustomNetConf()
-			if netConf == nil {
-				d.logger.Warn("CNI configuration not available for delegated IPAM, skipping ingress IP allocation")
-			} else {
-				ipamResult, releaseFunc, err := d.allocateIPWithDelegatedIPAM(d.ctx, netConf, "ingress")
+			// Reallocate the same address as before, if possible
+			ingressIPv4 := node.GetIngressIPv4(d.logger)
+			if ingressIPv4 != nil {
+				result, err = d.ipam.AllocateIPWithoutSyncUpstream(ingressIPv4, "ingress", ipam.PoolDefault())
 				if err != nil {
-					d.logger.Warn("unable to allocate ingress IPs via delegated IPAM",
+					d.logger.Warn("unable to re-allocate ingress IPv4.",
 						logfields.Error, err,
+						logfields.SourceIP, ingressIPv4,
 					)
+					result = nil
+				}
+			}
+
+			// Allocate a fresh IP if not restored, or the reallocation of the restored
+			// IP failed
+			if result == nil {
+				result, err = d.ipam.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv4, "ingress", ipam.PoolDefault())
+				if err != nil {
+					return fmt.Errorf("unable to allocate ingress IPs: %w, see https://cilium.link/ipam-range-full", err)
+				}
+			}
+
+			// Coalescing multiple CIDRs. GH #18868
+			if option.Config.EnableIPv4Masquerade &&
+				option.Config.IPAM == ipamOption.IPAMENI &&
+				result != nil &&
+				len(result.CIDRs) > 0 {
+				result.CIDRs, err = coalesceCIDRs(result.CIDRs)
+				if err != nil {
+					return fmt.Errorf("failed to coalesce CIDRs: %w", err)
+				}
+			}
+
+			node.SetIngressIPv4(result.IP)
+			d.logger.Info(fmt.Sprintf("  Ingress IPv4: %s", node.GetIngressIPv4(d.logger)))
+
+			// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the
+			// ENI MAC addr in order to set up rules and routes on the local node to
+			// direct ingress traffic out of the ENIs.
+			if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
+				if ingressRouting, err := parseRoutingInfo(d.logger, result); err != nil {
+					d.logger.Warn("Unable to allocate ingress information for ENI", logfields.Error, err)
 				} else {
-					// Store the release function for cleanup if needed
-					_ = releaseFunc
-
-					if option.Config.EnableIPv4 && ipamResult.IPV4 != nil {
-						ingressIP := net.ParseIP(ipamResult.IPV4.IP)
-						if ingressIP != nil {
-							node.SetIngressIPv4(ingressIP)
-							d.logger.Info("Allocated ingress IPv4 via delegated IPAM",
-								logfields.IPAddr, ingressIP,
-							)
-						}
-					}
-
-					if option.Config.EnableIPv6 && ipamResult.IPV6 != nil {
-						ingressIP := net.ParseIP(ipamResult.IPV6.IP)
-						if ingressIP != nil {
-							node.SetIngressIPv6(ingressIP)
-							d.logger.Info("Allocated ingress IPv6 via delegated IPAM",
-								logfields.IPAddr, ingressIP,
-							)
-						}
+					if err := ingressRouting.Configure(
+						result.IP,
+						d.mtuConfig.GetDeviceMTU(),
+						option.Config.EgressMultiHomeIPRuleCompat,
+						false,
+					); err != nil {
+						d.logger.Warn("Error while configuring ingress IP rules and routes.", logfields.Error, err)
 					}
 				}
 			}
-		} else {
-			// Use standard Cilium IPAM
-			if option.Config.EnableIPv4 {
-				var result *ipam.AllocationResult
-				var err error
+		}
 
-				// Reallocate the same address as before, if possible
-				existingIngressIPv4 := node.GetIngressIPv4(d.logger)
-				if existingIngressIPv4 != nil {
-					result, err = d.ipam.AllocateIPWithoutSyncUpstream(existingIngressIPv4, "ingress", ipam.PoolDefault())
-					if err != nil {
-						d.logger.Warn("unable to re-allocate ingress IPv4.",
-							logfields.Error, err,
-							logfields.SourceIP, existingIngressIPv4,
-						)
-						result = nil
-					}
-				}
+		// Only allocate if enabled and not restored already
+		if option.Config.EnableIPv6 {
+			var result *ipam.AllocationResult
+			var err error
 
-				// Allocate a fresh IP if not restored, or the reallocation of the restored
-				// IP failed
-				if result == nil {
-					result, err = d.ipam.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv4, "ingress", ipam.PoolDefault())
-					if err != nil {
-						return fmt.Errorf("unable to allocate ingress IPs: %w, see https://cilium.link/ipam-range-full", err)
-					}
-				}
-
-				// Coalescing multiple CIDRs. GH #18868
-				if option.Config.EnableIPv4Masquerade &&
-					option.Config.IPAM == ipamOption.IPAMENI &&
-					result != nil &&
-					len(result.CIDRs) > 0 {
-					result.CIDRs, err = coalesceCIDRs(result.CIDRs)
-					if err != nil {
-						return fmt.Errorf("failed to coalesce CIDRs: %w", err)
-					}
-				}
-
-				node.SetIngressIPv4(result.IP)
-				d.logger.Info(fmt.Sprintf("  Ingress IPv4: %s", node.GetIngressIPv4(d.logger)))
-
-				// In ENI and AlibabaCloud ENI mode, we require the gateway, CIDRs, and the
-				// ENI MAC addr in order to set up rules and routes on the local node to
-				// direct ingress traffic out of the ENIs.
-				if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
-					if ingressRouting, err := parseRoutingInfo(d.logger, result); err != nil {
-						d.logger.Warn("Unable to allocate ingress information for ENI", logfields.Error, err)
-					} else {
-						if err := ingressRouting.Configure(
-							result.IP,
-							d.mtuConfig.GetDeviceMTU(),
-							option.Config.EgressMultiHomeIPRuleCompat,
-							false,
-						); err != nil {
-							d.logger.Warn("Error while configuring ingress IP rules and routes.", logfields.Error, err)
-						}
-					}
+			// Reallocate the same address as before, if possible
+			ingressIPv6 := node.GetIngressIPv6(d.logger)
+			if ingressIPv6 != nil {
+				result, err = d.ipam.AllocateIPWithoutSyncUpstream(ingressIPv6, "ingress", ipam.PoolDefault())
+				if err != nil {
+					d.logger.Warn("unable to re-allocate ingress IPv6.",
+						logfields.Error, err,
+						logfields.SourceIP, ingressIPv6,
+					)
+					result = nil
 				}
 			}
 
-			// Only allocate if enabled and not restored already
-			if option.Config.EnableIPv6 {
-				var result *ipam.AllocationResult
-				var err error
-
-				// Reallocate the same address as before, if possible
-				existingIngressIPv6 := node.GetIngressIPv6(d.logger)
-				if existingIngressIPv6 != nil {
-					result, err = d.ipam.AllocateIPWithoutSyncUpstream(existingIngressIPv6, "ingress", ipam.PoolDefault())
-					if err != nil {
-						d.logger.Warn("unable to re-allocate ingress IPv6.",
-							logfields.Error, err,
-							logfields.SourceIP, existingIngressIPv6,
-						)
-						result = nil
+			// Allocate a fresh IP if not restored, or the reallocation of the restored
+			// IP failed
+			if result == nil {
+				result, err = d.ipam.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv6, "ingress", ipam.PoolDefault())
+				if err != nil {
+					if ingressIPv4 := node.GetIngressIPv4(d.logger); ingressIPv4 != nil {
+						d.ipam.ReleaseIP(ingressIPv4, ipam.PoolDefault())
+						node.SetIngressIPv4(nil)
 					}
+					return fmt.Errorf("unable to allocate ingress IPs: %w, see https://cilium.link/ipam-range-full", err)
 				}
-
-				// Allocate a fresh IP if not restored, or the reallocation of the restored
-				// IP failed
-				if result == nil {
-					result, err = d.ipam.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv6, "ingress", ipam.PoolDefault())
-					if err != nil {
-						if ingressIPv4 := node.GetIngressIPv4(d.logger); ingressIPv4 != nil {
-							d.ipam.ReleaseIP(ingressIPv4, ipam.PoolDefault())
-							node.SetIngressIPv4(nil)
-						}
-						return fmt.Errorf("unable to allocate ingress IPs: %w, see https://cilium.link/ipam-range-full", err)
-					}
-				}
-
-				// Coalescing multiple CIDRs. GH #18868
-				if option.Config.EnableIPv6Masquerade &&
-					option.Config.IPAM == ipamOption.IPAMENI &&
-					result != nil &&
-					len(result.CIDRs) > 0 {
-					result.CIDRs, err = coalesceCIDRs(result.CIDRs)
-					if err != nil {
-						return fmt.Errorf("failed to coalesce CIDRs: %w", err)
-					}
-				}
-
-				node.SetIngressIPv6(result.IP)
-				d.logger.Info(fmt.Sprintf("  Ingress IPv6: %s", node.GetIngressIPv6(d.logger)))
 			}
+
+			// Coalescing multiple CIDRs. GH #18868
+			if option.Config.EnableIPv6Masquerade &&
+				option.Config.IPAM == ipamOption.IPAMENI &&
+				result != nil &&
+				len(result.CIDRs) > 0 {
+				result.CIDRs, err = coalesceCIDRs(result.CIDRs)
+				if err != nil {
+					return fmt.Errorf("failed to coalesce CIDRs: %w", err)
+				}
+			}
+
+			node.SetIngressIPv6(result.IP)
+			d.logger.Info(fmt.Sprintf("  Ingress IPv6: %s", node.GetIngressIPv6(d.logger)))
 		}
 	}
 	bootstrapStats.ingressIPAM.End(true)
+	return nil
+}
+
+// allocateIngressIPsWithDelegatedIPAM allocates ingress IPs using the delegated IPAM plugin.
+func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
+	cniConfPath := viper.GetString(option.ReadCNIConfiguration)
+	if cniConfPath == "" {
+		return fmt.Errorf("CNI configuration path not set")
+	}
+	netConf, err := cnitypes.ReadNetConf(cniConfPath)
+	if err != nil {
+		return fmt.Errorf("failed to read CNI config: %w", err)
+	}
+	if netConf.Name == "" {
+		return fmt.Errorf("CNI config missing network name")
+	}
+
+	stdinData, err := json.Marshal(netConf)
+	if err != nil {
+		return fmt.Errorf("failed to marshal CNI config: %w", err)
+	}
+
+	cniPath := os.Getenv("CNI_PATH")
+	if cniPath == "" {
+		cniPath = "/opt/cni/bin"
+	}
+	os.Setenv("CNI_COMMAND", "ADD")
+	os.Setenv("CNI_CONTAINERID", "cilium-ingress")
+	os.Setenv("CNI_NETNS", "/proc/self/ns/net")
+	os.Setenv("CNI_IFNAME", "eth0")
+	os.Setenv("CNI_PATH", cniPath)
+
+	ipamRawResult, err := cniInvoke.DelegateAdd(d.ctx, netConf.IPAM.Type, stdinData, nil)
+	if err != nil {
+		return fmt.Errorf("delegated IPAM failed: %w", err)
+	}
+
+	ipamResult, err := cniTypesV1.NewResultFromResult(ipamRawResult)
+	if err != nil {
+		return fmt.Errorf("failed to parse IPAM result: %w", err)
+	}
+
+	for _, ipConfig := range ipamResult.IPs {
+		if ipConfig.Address.IP.To4() != nil && option.Config.EnableIPv4 {
+			node.SetIngressIPv4(ipConfig.Address.IP)
+			d.logger.Info("Allocated ingress IPv4 via delegated IPAM", logfields.IPAddr, ipConfig.Address.IP)
+		} else if option.Config.EnableIPv6 {
+			node.SetIngressIPv6(ipConfig.Address.IP)
+			d.logger.Info("Allocated ingress IPv6 via delegated IPAM", logfields.IPAddr, ipConfig.Address.IP)
+		}
+	}
 	return nil
 }
 

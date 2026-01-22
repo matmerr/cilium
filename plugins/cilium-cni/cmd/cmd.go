@@ -37,7 +37,6 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/defaults"
 	endpointid "github.com/cilium/cilium/pkg/endpoint/id"
-	delegatedipam "github.com/cilium/cilium/pkg/ipam/delegated"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/hooks"
@@ -184,6 +183,91 @@ func releaseIP(logger *slog.Logger, client *client.Client, ip, pool string) {
 			)
 		}
 	}
+}
+
+func allocateIPsWithDelegatedPlugin(
+	ctx context.Context,
+	conf *models.DaemonConfigurationStatus,
+	netConf *types.NetConf,
+	stdinData []byte,
+) (*models.IPAMResponse, func(context.Context), error) {
+	ipamRawResult, err := cniInvoke.DelegateAdd(ctx, netConf.IPAM.Type, stdinData, nil)
+	if err != nil {
+		// Since IP allocation failed, there are no IPs to clean up, so we don't need to return a releaseFunc.
+		return nil, nil, fmt.Errorf("failed to invoke delegated plugin ADD for IPAM: %w", err)
+	}
+
+	// CNI spec says if an error occurs, invoke DEL on the delegated plugin to release IPs.
+	releaseFunc := func(ctx context.Context) {
+		cniInvoke.DelegateDel(ctx, netConf.IPAM.Type, stdinData, nil)
+	}
+
+	ipamResult, err := cniTypesV1.NewResultFromResult(ipamRawResult)
+	if err != nil {
+		return nil, releaseFunc, fmt.Errorf("could not interpret delegated IPAM result for CNI version %s: %w", cniTypesV1.ImplementedSpecVersion, err)
+	}
+
+	// Translate the IPAM result into the same format as a response from Cilium agent.
+	ipam := &models.IPAMResponse{
+		HostAddressing: conf.Addressing,
+		Address:        &models.AddressPair{},
+	}
+
+	// Safe to assume at most one IP per family. The K8s API docs say:
+	// "Pods may be allocated at most 1 value for each of IPv4 and IPv6"
+	// https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/
+	// Interface returned by IPAM should be treated as the uplink for the Pod as CNI spec introduced by:
+	// https://github.com/containernetworking/cni/pull/1137
+	masterMac := ""
+	for _, iface := range ipamResult.Interfaces {
+		if iface.Sandbox != "" {
+			continue
+		}
+
+		if iface.Mac != "" {
+			if ifMac, err := net.ParseMAC(iface.Mac); err != nil {
+				return nil, releaseFunc, fmt.Errorf("failed to parse interface MAC %q: %w", iface.Mac, err)
+			} else {
+				masterMac = ifMac.String()
+			}
+		} else if iface.Name != "" {
+			if uplink, err := safenetlink.LinkByName(iface.Name); err != nil {
+				return nil, releaseFunc, fmt.Errorf("failed to get uplink %q: %w", iface.Name, err)
+			} else {
+				masterMac = uplink.Attrs().HardwareAddr.String()
+			}
+		}
+		break
+	}
+	// Interface number could not be determined from IPAM result for now.
+	// Set a static value zero before we have a proper solution.
+	// option.Config.EgressMultiHomeIPRuleCompat also needs to be set to true.
+	for _, ipConfig := range ipamResult.IPs {
+		ipNet := ipConfig.Address
+		if ipNet.IP.To4() != nil {
+			if conf.Addressing.IPV4 != nil {
+				ipam.Address.IPV4 = ipNet.String()
+				ipam.IPV4 = &models.IPAMAddressResponse{
+					IP:              ipNet.IP.String(),
+					Gateway:         ipConfig.Gateway.String(),
+					MasterMac:       masterMac,
+					InterfaceNumber: "0",
+				}
+			}
+		} else {
+			if conf.Addressing.IPV6 != nil {
+				ipam.Address.IPV6 = ipNet.String()
+				ipam.IPV6 = &models.IPAMAddressResponse{
+					IP:              ipNet.IP.String(),
+					Gateway:         ipConfig.Gateway.String(),
+					MasterMac:       masterMac,
+					InterfaceNumber: "0",
+				}
+			}
+		}
+	}
+
+	return ipam, releaseFunc, nil
 }
 
 func addIPConfigToLink(logger *slog.Logger, ip netip.Addr, routes []route.Route, rules []route.Rule, link netlink.Link, ifName string) error {
@@ -524,7 +608,7 @@ func (cmd *Cmd) Add(args *skel.CmdArgs) (err error) {
 		var ipam *models.IPAMResponse
 		var releaseIPsFunc func(context.Context)
 		if conf.IpamMode == ipamOption.IPAMDelegatedPlugin {
-			ipam, releaseIPsFunc, err = delegatedipam.AllocateIPsWithDelegatedPlugin(context.TODO(), conf, n, args.StdinData)
+			ipam, releaseIPsFunc, err = allocateIPsWithDelegatedPlugin(context.TODO(), conf, n, args.StdinData)
 		} else {
 			ipam, releaseIPsFunc, err = allocateIPsWithCiliumAgent(scopedLogger, c, cniArgs, epConf.IPAMPool())
 		}

@@ -281,14 +281,9 @@ func (i *cecTranslator) listenerMutators(m *model.Model) []ListenerMutator {
 		res = append(res, withAlpn())
 	}
 
-	// Disabled: Setting explicit listener address breaks BPF L7LB redirect when
-	// the L7LB proxy port equals the service port (e.g., both are 8080).
-	// By not setting the address, Envoy binds to an ephemeral port allocated by
-	// the agent, which avoids the port collision issue.
-	// See: https://github.com/cilium/cilium/issues/XXXXX
-	// if i.Config.HostNetworkConfig.Enabled {
-	// 	res = append(res, withHostNetworkPort(m, i.Config.IPConfig.IPv4Enabled, i.Config.IPConfig.IPv6Enabled))
-	// }
+	if i.Config.HostNetworkConfig.Enabled {
+		res = append(res, withHostNetworkPort(m, i.Config.IPConfig.IPv4Enabled, i.Config.IPConfig.IPv6Enabled))
+	}
 
 	if i.Config.ListenerConfig.StreamIdleTimeoutSeconds > 0 {
 		res = append(res, WithStreamIdleTimeout(i.Config.ListenerConfig.StreamIdleTimeoutSeconds))

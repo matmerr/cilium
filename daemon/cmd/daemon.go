@@ -15,7 +15,6 @@ import (
 	"github.com/cilium/statedb"
 	"github.com/vishvananda/netlink"
 
-	"github.com/cilium/cilium/daemon/cmd/cni"
 	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/clustermesh"
 	"github.com/cilium/cilium/pkg/controller"
@@ -99,9 +98,6 @@ type Daemon struct {
 
 	// ipam is the IP address manager of the agent
 	ipam *ipam.IPAM
-
-	// cniConfigManager provides access to CNI configuration for delegated IPAM
-	cniConfigManager cni.CNIConfigManager
 
 	endpointCreator endpointcreator.EndpointCreator
 	endpointManager endpointmanager.EndpointManager
@@ -316,7 +312,6 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		endpointMetadata:  params.EndpointMetadata,
 		k8sWatcher:        params.K8sWatcher,
 		ipam:              params.IPAM,
-		cniConfigManager:  params.CNIConfigManager,
 		maglevConfig:      params.MaglevConfig,
 		lbConfig:          params.LBConfig,
 		kprCfg:            params.KPRConfig,
