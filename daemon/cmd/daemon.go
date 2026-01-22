@@ -15,8 +15,8 @@ import (
 	"github.com/cilium/statedb"
 	"github.com/vishvananda/netlink"
 
-	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/daemon/cmd/cni"
+	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/clustermesh"
 	"github.com/cilium/cilium/pkg/controller"
 	linuxdatapath "github.com/cilium/cilium/pkg/datapath/linux"
@@ -343,6 +343,26 @@ healthConfig:      params.HealthConfig,
 	}
 
 	bootstrapStats.daemonInit.End(true)
+
+	// Clean up stale ingress IP if gateway is now disabled but delegated IPAM was previously used.
+	// This handles the case where gateway was enabled, IP was allocated via delegated IPAM,
+	// and then Cilium restarts with gateway disabled.
+	if !option.Config.EnableEnvoyConfig && option.Config.IPAM == ipamOption.IPAMDelegatedPlugin {
+		d.logger.Info("Gateway is disabled, checking for stale ingress IP to deallocate")
+		if err := d.deallocateIngressIPsWithDelegatedIPAM(); err != nil {
+			d.logger.Debug("No stale ingress IP to deallocate or deallocation failed", logfields.Error, err)
+		}
+	}
+
+	// Deallocate ingress IPs with delegated IPAM on shutdown.
+	if option.Config.EnableEnvoyConfig && option.Config.IPAM == ipamOption.IPAMDelegatedPlugin {
+		cleaner.cleanupFuncs.Add(func() {
+			d.logger.Info("Running ingress IP deallocation cleanup function")
+			if err := d.deallocateIngressIPsWithDelegatedIPAM(); err != nil {
+				d.logger.Warn("Failed to deallocate ingress IPs via delegated IPAM", logfields.Error, err)
+			}
+		})
+	}
 
 	// Stop all endpoints (its goroutines) on exit.
 	cleaner.cleanupFuncs.Add(func() {

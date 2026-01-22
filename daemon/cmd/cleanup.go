@@ -51,5 +51,4 @@ func (d *daemonCleanup) Clean() {
 	d.preCleanupFuncs.Run()
 	pidfile.Clean()
 	d.cleanupFuncs.Run()
-
 }

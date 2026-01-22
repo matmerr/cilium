@@ -484,6 +484,9 @@ func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
 	os.Setenv("CNI_NETNS", netnsPath)
 	os.Setenv("CNI_IFNAME", "eth0")
 	os.Setenv("CNI_PATH", cniPath)
+	// Set CNI_ARGS with pod name/namespace for Azure CNS state tracking.
+	// Using "kube-system" namespace and "cilium-ingress" as pod name for the ingress IP.
+	os.Setenv("CNI_ARGS", "K8S_POD_NAME=cilium-ingress;K8S_POD_NAMESPACE=kube-system")
 
 	ipamRawResult, err := cniInvoke.DelegateAdd(d.ctx, netConf.IPAM.Type, stdinData, nil)
 	if err != nil {
@@ -504,6 +507,52 @@ func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
 			d.logger.Info("Allocated ingress IPv6 via delegated IPAM", logfields.IPAddr, ipConfig.Address.IP)
 		}
 	}
+	return nil
+}
+
+// deallocateIngressIPsWithDelegatedIPAM releases ingress IPs using the delegated IPAM plugin.
+func (d *Daemon) deallocateIngressIPsWithDelegatedIPAM() error {
+	d.logger.Info("Starting deallocation of ingress IPs via delegated IPAM")
+
+	netConf := d.cniConfigManager.GetCustomNetConf()
+	if netConf == nil {
+		return fmt.Errorf("CNI configuration not available (--read-cni-conf not set)")
+	}
+	if netConf.Name == "" {
+		return fmt.Errorf("CNI config missing network name")
+	}
+
+	stdinData, err := json.Marshal(netConf)
+	if err != nil {
+		return fmt.Errorf("failed to marshal CNI config: %w", err)
+	}
+
+	// Use /host/opt/cni/bin since host's CNI plugins are mounted there in the container.
+	cniPath := os.Getenv("CNI_PATH")
+	if cniPath == "" {
+		cniPath = "/host/opt/cni/bin"
+	}
+
+	netnsPath := "/var/run/netns/cilium-ingress"
+
+	os.Setenv("CNI_COMMAND", "DEL")
+	os.Setenv("CNI_CONTAINERID", "cilium-ingress")
+	os.Setenv("CNI_NETNS", netnsPath)
+	os.Setenv("CNI_IFNAME", "eth0")
+	os.Setenv("CNI_PATH", cniPath)
+	os.Setenv("CNI_ARGS", "K8S_POD_NAME=cilium-ingress;K8S_POD_NAMESPACE=kube-system")
+
+	// Use a fresh context since d.ctx may be cancelled during shutdown.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := cniInvoke.DelegateDel(ctx, netConf.IPAM.Type, stdinData, nil); err != nil {
+		return fmt.Errorf("delegated IPAM DEL failed: %w", err)
+	}
+
+	d.logger.Info("Deallocated ingress IPs via delegated IPAM")
+	node.SetIngressIPv4(nil)
+	node.SetIngressIPv6(nil)
 	return nil
 }
 
