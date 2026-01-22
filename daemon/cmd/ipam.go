@@ -5,13 +5,18 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
 	"github.com/cilium/statedb"
+	cniInvoke "github.com/containernetworking/cni/pkg/invoke"
+	cniTypesV1 "github.com/containernetworking/cni/pkg/types/100"
+	"github.com/spf13/viper"
 
 	"github.com/cilium/cilium/pkg/cidr"
 	linuxrouting "github.com/cilium/cilium/pkg/datapath/linux/routing"
@@ -27,6 +32,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/rate"
 	"github.com/cilium/cilium/pkg/time"
+	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
 )
 
 const (
@@ -321,6 +327,14 @@ func (d *Daemon) allocateHealthIPs() error {
 func (d *Daemon) allocateIngressIPs() error {
 	bootstrapStats.ingressIPAM.Start()
 	if option.Config.EnableEnvoyConfig {
+		// Use delegated IPAM for ingress IP allocation when configured
+		if option.Config.IPAM == ipamOption.IPAMDelegatedPlugin {
+			if err := d.allocateIngressIPsWithDelegatedIPAM(); err != nil {
+				d.logger.Warn("delegated IPAM for ingress failed", logfields.Error, err)
+			}
+			bootstrapStats.ingressIPAM.End(true)
+			return nil
+		}
 		if option.Config.EnableIPv4 {
 			var result *ipam.AllocationResult
 			var err error
@@ -427,6 +441,57 @@ func (d *Daemon) allocateIngressIPs() error {
 		}
 	}
 	bootstrapStats.ingressIPAM.End(true)
+	return nil
+}
+
+// allocateIngressIPsWithDelegatedIPAM allocates ingress IPs using the delegated IPAM plugin.
+func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
+	cniConfPath := viper.GetString(option.ReadCNIConfiguration)
+	if cniConfPath == "" {
+		return fmt.Errorf("CNI configuration path not set")
+	}
+	netConf, err := cnitypes.ReadNetConf(cniConfPath)
+	if err != nil {
+		return fmt.Errorf("failed to read CNI config: %w", err)
+	}
+	if netConf.Name == "" {
+		return fmt.Errorf("CNI config missing network name")
+	}
+
+	stdinData, err := json.Marshal(netConf)
+	if err != nil {
+		return fmt.Errorf("failed to marshal CNI config: %w", err)
+	}
+
+	cniPath := os.Getenv("CNI_PATH")
+	if cniPath == "" {
+		cniPath = "/opt/cni/bin"
+	}
+	os.Setenv("CNI_COMMAND", "ADD")
+	os.Setenv("CNI_CONTAINERID", "cilium-ingress")
+	os.Setenv("CNI_NETNS", "/proc/self/ns/net")
+	os.Setenv("CNI_IFNAME", "eth0")
+	os.Setenv("CNI_PATH", cniPath)
+
+	ipamRawResult, err := cniInvoke.DelegateAdd(d.ctx, netConf.IPAM.Type, stdinData, nil)
+	if err != nil {
+		return fmt.Errorf("delegated IPAM failed: %w", err)
+	}
+
+	ipamResult, err := cniTypesV1.NewResultFromResult(ipamRawResult)
+	if err != nil {
+		return fmt.Errorf("failed to parse IPAM result: %w", err)
+	}
+
+	for _, ipConfig := range ipamResult.IPs {
+		if ipConfig.Address.IP.To4() != nil && option.Config.EnableIPv4 {
+			node.SetIngressIPv4(ipConfig.Address.IP)
+			d.logger.Info("Allocated ingress IPv4 via delegated IPAM", logfields.IPAddr, ipConfig.Address.IP)
+		} else if option.Config.EnableIPv6 {
+			node.SetIngressIPv6(ipConfig.Address.IP)
+			d.logger.Info("Allocated ingress IPv6 via delegated IPAM", logfields.IPAddr, ipConfig.Address.IP)
+		}
+	}
 	return nil
 }
 
