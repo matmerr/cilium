@@ -446,7 +446,7 @@ func (d *Daemon) allocateIngressIPs() error {
 func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
 	netConf := d.cniConfigManager.GetCustomNetConf()
 	if netConf == nil {
-		return fmt.Errorf("CNI configuration not available (--read-cni-conf not set)")
+		return fmt.Errorf("CNI configuration not available")
 	}
 	if netConf.Name == "" {
 		return fmt.Errorf("CNI config missing network name")
@@ -457,36 +457,24 @@ func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
 		return fmt.Errorf("failed to marshal CNI config: %w", err)
 	}
 
-	// Use /host/opt/cni/bin since host's CNI plugins are mounted there in the container.
-	// Fall back to CNI_PATH environment variable if set.
-	cniPath := os.Getenv("CNI_PATH")
-	if cniPath == "" {
-		cniPath = "/host/opt/cni/bin"
+	// Default CNI_PATH if not set, /host/opt/cni/bin is where host CNI binaries are mounted.
+	if os.Getenv("CNI_PATH") == "" {
+		os.Setenv("CNI_PATH", "/host/opt/cni/bin")
 	}
 
-	// Create a temporary network namespace for the CNI call.
-	// The azure-ipam plugin requires a different netns than the calling process.
-	netnsPath := "/var/run/netns/cilium-ingress"
-	if err := os.MkdirAll("/var/run/netns", 0755); err != nil {
-		return fmt.Errorf("failed to create netns directory: %w", err)
-	}
-	// Create a bind mount for a new netns by touching the file and using unshare
-	if _, err := os.Stat(netnsPath); os.IsNotExist(err) {
-		f, err := os.Create(netnsPath)
-		if err != nil {
-			return fmt.Errorf("failed to create netns file: %w", err)
-		}
-		f.Close()
-	}
+	netnsPath := "/proc/1/ns/net"
 
+	nodeName := nodeTypes.GetName()
+	containerID := fmt.Sprintf("cilium-ingress-%s", nodeName)
 	os.Setenv("CNI_COMMAND", "ADD")
-	os.Setenv("CNI_CONTAINERID", "cilium-ingress")
+	os.Setenv("CNI_CONTAINERID", containerID)
 	os.Setenv("CNI_NETNS", netnsPath)
+
+	// Bypass host netns check since we're using the host netns as a dummy value for the call
+	// https://github.com/containernetworking/cni/blob/7c270076995b6a35f4774ce94dafcf266d1c6925/pkg/skel/skel.go#L255
+	os.Setenv("CNI_NETNS_OVERRIDE", "1")
 	os.Setenv("CNI_IFNAME", "eth0")
-	os.Setenv("CNI_PATH", cniPath)
-	// Set CNI_ARGS with pod name/namespace for Azure CNS state tracking.
-	// Using "kube-system" namespace and "cilium-ingress" as pod name for the ingress IP.
-	os.Setenv("CNI_ARGS", "K8S_POD_NAME=cilium-ingress;K8S_POD_NAMESPACE=kube-system")
+	os.Setenv("CNI_ARGS", fmt.Sprintf("K8S_POD_NAME=cilium-ingress-%s;K8S_POD_NAMESPACE=kube-system", nodeName))
 
 	ipamRawResult, err := cniInvoke.DelegateAdd(d.ctx, netConf.IPAM.Type, stdinData, nil)
 	if err != nil {
@@ -510,13 +498,12 @@ func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
 	return nil
 }
 
-// deallocateIngressIPsWithDelegatedIPAM releases ingress IPs using the delegated IPAM plugin.
 func (d *Daemon) deallocateIngressIPsWithDelegatedIPAM() error {
 	d.logger.Info("Starting deallocation of ingress IPs via delegated IPAM")
 
 	netConf := d.cniConfigManager.GetCustomNetConf()
 	if netConf == nil {
-		return fmt.Errorf("CNI configuration not available (--read-cni-conf not set)")
+		return fmt.Errorf("CNI configuration not available")
 	}
 	if netConf.Name == "" {
 		return fmt.Errorf("CNI config missing network name")
@@ -527,22 +514,25 @@ func (d *Daemon) deallocateIngressIPsWithDelegatedIPAM() error {
 		return fmt.Errorf("failed to marshal CNI config: %w", err)
 	}
 
-	// Use /host/opt/cni/bin since host's CNI plugins are mounted there in the container.
-	cniPath := os.Getenv("CNI_PATH")
-	if cniPath == "" {
-		cniPath = "/host/opt/cni/bin"
+	// Default CNI_PATH if not set; /host/opt/cni/bin is where host CNI binaries are mounted
+	if os.Getenv("CNI_PATH") == "" {
+		os.Setenv("CNI_PATH", "/host/opt/cni/bin")
 	}
 
-	netnsPath := "/var/run/netns/cilium-ingress"
+	netnsPath := "/proc/1/ns/net"
 
+	nodeName := nodeTypes.GetName()
+	containerID := fmt.Sprintf("cilium-ingress-%s", nodeName)
 	os.Setenv("CNI_COMMAND", "DEL")
-	os.Setenv("CNI_CONTAINERID", "cilium-ingress")
+	os.Setenv("CNI_CONTAINERID", containerID)
 	os.Setenv("CNI_NETNS", netnsPath)
-	os.Setenv("CNI_IFNAME", "eth0")
-	os.Setenv("CNI_PATH", cniPath)
-	os.Setenv("CNI_ARGS", "K8S_POD_NAME=cilium-ingress;K8S_POD_NAMESPACE=kube-system")
 
-	// Use a fresh context since d.ctx may be cancelled during shutdown.
+	// Bypass host netns check since we're using the host netns as a dummy value for the call
+	// https://github.com/containernetworking/cni/blob/7c270076995b6a35f4774ce94dafcf266d1c6925/pkg/skel/skel.go#L255
+	os.Setenv("CNI_NETNS_OVERRIDE", "1")
+	os.Setenv("CNI_IFNAME", "eth0")
+	os.Setenv("CNI_ARGS", fmt.Sprintf("K8S_POD_NAME=cilium-ingress-%s;K8S_POD_NAMESPACE=kube-system", nodeName))
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -550,7 +540,11 @@ func (d *Daemon) deallocateIngressIPsWithDelegatedIPAM() error {
 		return fmt.Errorf("delegated IPAM DEL failed: %w", err)
 	}
 
-	d.logger.Info("Deallocated ingress IPs via delegated IPAM")
+	d.logger.Info("Deallocated ingress IPs via delegated IPAM",
+		logfields.IPv4, node.GetIngressIPv4(d.logger),
+		logfields.IPv6, node.GetIngressIPv6(d.logger),
+		logfields.NodeName, nodeTypes.GetName(),
+	)
 	node.SetIngressIPv4(nil)
 	node.SetIngressIPv6(nil)
 	return nil
