@@ -31,6 +31,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/rate"
 	"github.com/cilium/cilium/pkg/time"
+	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
 )
 
 const (
@@ -442,11 +443,29 @@ func (d *Daemon) allocateIngressIPs() error {
 	return nil
 }
 
+// defaultCNIConfPath is the standard location for CNI config with delegated IPAM.
+const defaultCNIConfPath = "/host/etc/cni/net.d/05-cilium.conflist"
+
+// getCNIConfigForDelegatedIPAM retrieves the CNI configuration for delegated IPAM.
+func (d *Daemon) getCNIConfigForDelegatedIPAM() (*cnitypes.NetConf, error) {
+	// First, try the custom net conf from cniConfigManager (set via --read-cni-conf)
+	if netConf := d.cniConfigManager.GetCustomNetConf(); netConf != nil {
+		return netConf, nil
+	}
+
+	// Fall back to hardcoded path
+	netConf, err := cnitypes.ReadNetConf(defaultCNIConfPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CNI config from %s: %w", defaultCNIConfPath, err)
+	}
+	return netConf, nil
+}
+
 // allocateIngressIPsWithDelegatedIPAM allocates ingress IPs using the delegated IPAM plugin.
 func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
-	netConf := d.cniConfigManager.GetCustomNetConf()
-	if netConf == nil {
-		return fmt.Errorf("CNI configuration not available")
+	netConf, err := d.getCNIConfigForDelegatedIPAM()
+	if err != nil {
+		return fmt.Errorf("CNI configuration not available: %w", err)
 	}
 	if netConf.Name == "" {
 		return fmt.Errorf("CNI config missing network name")
@@ -501,9 +520,9 @@ func (d *Daemon) allocateIngressIPsWithDelegatedIPAM() error {
 func (d *Daemon) deallocateIngressIPsWithDelegatedIPAM() error {
 	d.logger.Info("Starting deallocation of ingress IPs via delegated IPAM")
 
-	netConf := d.cniConfigManager.GetCustomNetConf()
-	if netConf == nil {
-		return fmt.Errorf("CNI configuration not available")
+	netConf, err := d.getCNIConfigForDelegatedIPAM()
+	if err != nil {
+		return fmt.Errorf("CNI configuration not available: %w", err)
 	}
 	if netConf.Name == "" {
 		return fmt.Errorf("CNI config missing network name")
