@@ -133,7 +133,7 @@ type Daemon struct {
 	lbConfig loadbalancer.Config
 	kprCfg   kpr.KPRConfig
 
-healthConfig healthconfig.CiliumHealthConfig
+	healthConfig     healthconfig.CiliumHealthConfig
 	cniConfigManager cni.CNIConfigManager
 }
 
@@ -319,7 +319,7 @@ func newDaemon(ctx context.Context, cleaner *daemonCleanup, params *daemonParams
 		kprCfg:            params.KPRConfig,
 		ciliumHealth:      params.CiliumHealth,
 		endpointAPIFence:  params.EndpointAPIFence,
-healthConfig:      params.HealthConfig,
+		healthConfig:      params.HealthConfig,
 		cniConfigManager:  params.CNIConfigManager,
 	}
 

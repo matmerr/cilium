@@ -1412,7 +1412,7 @@ type daemonParams struct {
 	DNSNameManager      namemanager.NameManager
 	KPRConfig           kpr.KPRConfig
 	EndpointAPIFence    endpointapi.Fence
-HealthConfig        healthconfig.CiliumHealthConfig
+	HealthConfig        healthconfig.CiliumHealthConfig
 	CNIConfigManager    cni.CNIConfigManager
 }
 
