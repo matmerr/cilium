@@ -1,0 +1,8 @@
+# Built binaries
+cilium-delegated-test-ipam
+test-ipam-daemonset
+test-ipam-operator
+
+# Generated Kind config and conflist files
+kind-config.yaml
+*-conflist.json

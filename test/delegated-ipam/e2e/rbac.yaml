@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-ipam
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: test-ipam
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["test.cilium.io"]
+    resources: ["ciliumtestipams"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["test.cilium.io"]
+    resources: ["ciliumtestipams/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: test-ipam
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: test-ipam
+subjects:
+  - kind: ServiceAccount
+    name: test-ipam
+    namespace: kube-system

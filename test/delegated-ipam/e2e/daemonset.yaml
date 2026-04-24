@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cilium-delegated-ipam
+  namespace: kube-system
+  labels:
+    app: cilium-delegated-ipam
+spec:
+  selector:
+    matchLabels:
+      app: cilium-delegated-ipam
+  template:
+    metadata:
+      labels:
+        app: cilium-delegated-ipam
+    spec:
+      hostNetwork: true
+      serviceAccountName: test-ipam
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: daemonset
+          image: busybox:latest
+          command: ["/host-bin/test-ipam-daemonset"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SOCKET_PATH
+              value: "/var/run/cilium/test-ipam.sock"
+            - name: HEALTH_PORT
+              value: "19876"
+          volumeMounts:
+            - name: host-bin
+              mountPath: /host-bin
+              readOnly: true
+            - name: run-cilium
+              mountPath: /var/run/cilium
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 19876
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: host-bin
+          hostPath:
+            path: /usr/local/bin
+            type: Directory
+        - name: run-cilium
+          hostPath:
+            path: /var/run/cilium
+            type: DirectoryOrCreate

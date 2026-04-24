@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cilium-delegated-ipam-operator
+  namespace: kube-system
+  labels:
+    app: cilium-delegated-ipam-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cilium-delegated-ipam-operator
+  template:
+    metadata:
+      labels:
+        app: cilium-delegated-ipam-operator
+    spec:
+      hostNetwork: true
+      serviceAccountName: test-ipam
+      tolerations:
+        - operator: Exists
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      containers:
+        - name: operator
+          image: busybox:latest
+          command: ["/host-bin/test-ipam-operator"]
+          env:
+            - name: PARENT_SUBNET
+              value: "10.244.0.0/16"
+          volumeMounts:
+            - name: host-bin
+              mountPath: /host-bin
+              readOnly: true
+      volumes:
+        - name: host-bin
+          hostPath:
+            path: /usr/local/bin
+            type: Directory
