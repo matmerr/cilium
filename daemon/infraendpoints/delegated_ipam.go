@@ -15,6 +15,7 @@ import (
 	cnitypesv1 "github.com/containernetworking/cni/pkg/types/100"
 
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/netns"
 	"github.com/cilium/cilium/pkg/node"
 )
 
@@ -27,51 +28,51 @@ const (
 	// real interface, but part of the IPAM bookkeeping key so must match ADD/DEL.
 	delegatedIPAMIfName = "eth0"
 
-	// delegatedIPAMNetNS is the CNI_NETNS used for ingress IP allocations, the host
-	// netns is used and CNI_NETNS_OVERRIDE=1 bypasses plugin-side netns validation.
-	delegatedIPAMNetNS = "/proc/1/ns/net"
-
 	// delegatedIPAMPodNamespace is the K8S_POD_NAMESPACE CNI arg, set to kube-system
 	// since the agent (a kube-system component) owns this allocation.
 	delegatedIPAMPodNamespace = "kube-system"
 )
 
-// delegatedIPAMContainerID returns the CNI container ID for ingress IP allocations on the given node.
 func delegatedIPAMContainerID(nodeName string) string {
 	return delegatedIPAMContainerIDPrefix + nodeName
 }
 
-// delegatedIPAMHostNetnsArgs wraps cniinvoke.Args to override AsEnv (see method comment).
-type delegatedIPAMHostNetnsArgs struct {
-	cniinvoke.Args
+type delegatedIPAMNetNS interface {
+	Path() string
+	// Close releases the netns handle; the kernel destroys the underlying netns
+	// once no references remain (we never pin it or run a process inside).
+	Close() error
 }
 
-// newDelegatedIPAMArgs builds the CNI args for an ingress-IP ADD/DEL. The same construction is used
-// for both so the bookkeeping key (containerID + ifname) matches; drift would leak external IPAM IPs.
-func newDelegatedIPAMArgs(command, containerID, cniBinPath string) *delegatedIPAMHostNetnsArgs {
-	return &delegatedIPAMHostNetnsArgs{
-		Args: cniinvoke.Args{
-			Command:     command,
-			ContainerID: containerID,
-			NetNS:       delegatedIPAMNetNS,
-			IfName:      delegatedIPAMIfName,
-			Path:        cniBinPath,
-			PluginArgs: [][2]string{
-				// IgnoreUnknown lets strict IPAM plugins (e.g. host-local) tolerate the K8S_POD_* args.
-				{"IgnoreUnknown", "true"},
-				{"K8S_POD_NAME", containerID},
-				{"K8S_POD_NAMESPACE", delegatedIPAMPodNamespace},
-			},
+type realDelegatedIPAMNetNS struct {
+	ns *netns.NetNS
+}
+
+// newDelegatedIPAMNetNS creates a fresh, empty network namespace. The returned handle is unpinned.
+func newDelegatedIPAMNetNS() (delegatedIPAMNetNS, error) {
+	ns, err := netns.New()
+	if err != nil {
+		return nil, fmt.Errorf("create delegated IPAM netns: %w", err)
+	}
+	return &realDelegatedIPAMNetNS{ns: ns}, nil
+}
+
+func (s *realDelegatedIPAMNetNS) Path() string { return fmt.Sprintf("/proc/self/fd/%d", s.ns.FD()) }
+func (s *realDelegatedIPAMNetNS) Close() error { return s.ns.Close() }
+
+func newDelegatedIPAMArgs(command, containerID, cniBinPath string, netns delegatedIPAMNetNS) *cniinvoke.Args {
+	return &cniinvoke.Args{
+		Command:     command,
+		ContainerID: containerID,
+		NetNS:       netns.Path(),
+		IfName:      delegatedIPAMIfName,
+		Path:        cniBinPath,
+		PluginArgs: [][2]string{
+			{"IgnoreUnknown", "true"},
+			{"K8S_POD_NAME", containerID},
+			{"K8S_POD_NAMESPACE", delegatedIPAMPodNamespace},
 		},
 	}
-}
-
-// AsEnv extends the wrapped Args' env with CNI_NETNS_OVERRIDE=1, which is required
-// because we invoke the IPAM plugin against the host netns rather than a real container.
-func (a *delegatedIPAMHostNetnsArgs) AsEnv() []string {
-	env := a.Args.AsEnv()
-	env = append(env, "CNI_NETNS_OVERRIDE=1")
-	return env
 }
 
 // newDefaultCNIExec returns a default CNI exec implementation that pipes plugin stderr to the
@@ -105,7 +106,18 @@ func (r *infraIPAllocator) delegatedIPAMPluginConfig() (*libcni.PluginConfig, er
 }
 
 // allocateIngressIPsWithDelegatedIPAMExec allocates ingress IPs using an external CNI IPAM plugin.
-func (r *infraIPAllocator) allocateIngressIPsWithDelegatedIPAMExec(ctx context.Context, exec cniinvoke.Exec) (retErr error) {
+func (r *infraIPAllocator) allocateIngressIPsWithDelegatedIPAMExec(ctx context.Context, exec cniinvoke.Exec) error {
+	netns, err := newDelegatedIPAMNetNS()
+	if err != nil {
+		return err
+	}
+	return r.allocateIngressIPsWithDelegatedIPAMExecAndNetNS(ctx, exec, netns)
+}
+
+func (r *infraIPAllocator) allocateIngressIPsWithDelegatedIPAMExecAndNetNS(ctx context.Context, exec cniinvoke.Exec, netns delegatedIPAMNetNS) (retErr error) {
+	defer netns.Close()
+	r.logger.Debug("Created ephemeral netns for delegated IPAM ingress allocation", logfields.NetNSName, netns.Path())
+
 	localNode, err := r.localNodeStore.Get(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get local node for delegated IPAM ingress allocation: %w", err)
@@ -127,21 +139,22 @@ func (r *infraIPAllocator) allocateIngressIPsWithDelegatedIPAMExec(ctx context.C
 	}
 
 	containerID := delegatedIPAMContainerID(localNode.Name)
-	args := newDelegatedIPAMArgs("ADD", containerID, cniBinPath)
+	args := newDelegatedIPAMArgs("ADD", containerID, cniBinPath, netns)
+
 	rawResult, err := cniinvoke.ExecPluginWithResult(ctx, pluginPath, pluginConf.Bytes, args, exec)
 	if err != nil {
 		return fmt.Errorf("failed to execute IPAM plugin %q for ingress IP allocation: %w", ipamType, err)
 	}
 
-	// From this point the plugin holds an external lease keyed on containerID.
-	// If we return an error later, issue a compensating DEL so retries don't
-	// collide with an orphaned lease.
+	// From this point the plugin holds an external lease keyed on (containerID, ifname).
+	// If we return an error later, issue a compensating DEL so retries don't collide with
+	// an orphaned lease.
 	defer func() {
 		if retErr == nil {
 			return
 		}
-		delArgs := newDelegatedIPAMArgs("DEL", containerID, cniBinPath)
-		if delErr := cniinvoke.ExecPluginWithoutResult(ctx, pluginPath, pluginConf.Bytes, delArgs, exec); delErr != nil {
+		args.Command = "DEL"
+		if delErr := cniinvoke.ExecPluginWithoutResult(ctx, pluginPath, pluginConf.Bytes, args, exec); delErr != nil {
 			r.logger.Warn("Failed to release lease via delegated IPAM after allocation error, lease may be orphaned",
 				logfields.Error, delErr,
 			)
@@ -209,6 +222,20 @@ func (r *infraIPAllocator) allocateIngressIPsWithDelegatedIPAMExec(ctx context.C
 // Failures are logged and swallowed: cleanup is best-effort because we cannot block agent startup
 // on a misbehaving external plugin.
 func (r *infraIPAllocator) deallocateIngressIPsWithDelegatedIPAMExec(ctx context.Context, exec cniinvoke.Exec) {
+	netns, err := newDelegatedIPAMNetNS()
+	if err != nil {
+		r.logger.Warn("Cannot deallocate ingress IPs with delegated IPAM, netns unavailable",
+			logfields.Error, err,
+		)
+		return
+	}
+	r.deallocateIngressIPsWithDelegatedIPAMExecAndNetNS(ctx, exec, netns)
+}
+
+func (r *infraIPAllocator) deallocateIngressIPsWithDelegatedIPAMExecAndNetNS(ctx context.Context, exec cniinvoke.Exec, netns delegatedIPAMNetNS) {
+	defer netns.Close()
+	r.logger.Debug("Created ephemeral netns for delegated IPAM ingress deallocation", logfields.NetNSName, netns.Path())
+
 	pluginConf, err := r.delegatedIPAMPluginConfig()
 	if err != nil {
 		r.logger.Warn("Cannot deallocate ingress IPs with delegated IPAM", logfields.Error, err)
@@ -237,7 +264,8 @@ func (r *infraIPAllocator) deallocateIngressIPsWithDelegatedIPAMExec(ctx context
 		return
 	}
 
-	args := newDelegatedIPAMArgs("DEL", delegatedIPAMContainerID(localNode.Name), cniBinPath)
+	args := newDelegatedIPAMArgs("DEL", delegatedIPAMContainerID(localNode.Name), cniBinPath, netns)
+
 	if err := cniinvoke.ExecPluginWithoutResult(ctx, pluginPath, pluginConf.Bytes, args, exec); err != nil {
 		r.logger.Warn("Failed to deallocate ingress IPs with delegated IPAM", logfields.Error, err)
 		return

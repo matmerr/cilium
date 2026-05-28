@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +26,19 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
 )
+
+// fakeDelegatedIPAMNetNS is a delegatedIPAMNetNS that doesn't touch the kernel; lets unit
+// tests exercise the delegated IPAM flow unprivileged.
+type fakeDelegatedIPAMNetNS struct {
+	path   string
+	closed bool
+}
+
+func (f *fakeDelegatedIPAMNetNS) Path() string { return f.path }
+func (f *fakeDelegatedIPAMNetNS) Close() error { f.closed = true; return nil }
+func newFakeNetNS() *fakeDelegatedIPAMNetNS {
+	return &fakeDelegatedIPAMNetNS{path: "/proc/self/fd/1234"}
+}
 
 // mockCNIExec implements cniInvoke.Exec for testing.
 type mockCNIExec struct {
@@ -58,10 +70,11 @@ func (m *mockCNIExec) FindInPath(plugin string, paths []string) (string, error) 
 }
 
 func TestNewDelegatedIPAMArgs(t *testing.T) {
-	args := newDelegatedIPAMArgs("ADD", "cilium-ingress-node-a", "/opt/cni/bin")
+	netns := newFakeNetNS()
+	args := newDelegatedIPAMArgs("ADD", "cilium-ingress-node-a", "/opt/cni/bin", netns)
 	require.Equal(t, "ADD", args.Command)
 	require.Equal(t, "cilium-ingress-node-a", args.ContainerID)
-	require.Equal(t, "/proc/1/ns/net", args.NetNS)
+	require.Equal(t, "/proc/self/fd/1234", args.NetNS)
 	require.Equal(t, "eth0", args.IfName)
 	require.Equal(t, "/opt/cni/bin", args.Path)
 	require.Equal(t, [][2]string{
@@ -70,13 +83,10 @@ func TestNewDelegatedIPAMArgs(t *testing.T) {
 		{"K8S_POD_NAMESPACE", "kube-system"},
 	}, args.PluginArgs)
 
-	delArgs := newDelegatedIPAMArgs("DEL", "cilium-ingress-node-a", "/opt/cni/bin")
+	delArgs := newDelegatedIPAMArgs("DEL", "cilium-ingress-node-a", "/opt/cni/bin", newFakeNetNS())
 	require.Equal(t, "DEL", delArgs.Command)
-	// ADD and DEL must produce identical bookkeeping keys (containerID + ifname),
-	// otherwise IPAM plugins (e.g. host-local) won't release what was allocated.
 	require.Equal(t, args.ContainerID, delArgs.ContainerID)
 	require.Equal(t, args.IfName, delArgs.IfName)
-	require.Equal(t, args.NetNS, delArgs.NetNS)
 }
 
 func TestDelegatedIPAMContainerID(t *testing.T) {
@@ -157,13 +167,6 @@ func TestDelegatedIPAMPluginConfig(t *testing.T) {
 			require.Contains(t, err.Error(), tt.expectErr)
 		})
 	}
-}
-
-func TestDelegatedIPAMArgsAsEnv(t *testing.T) {
-	args := newDelegatedIPAMArgs("ADD", "cilium-ingress-node-a", "/opt/cni/bin")
-	env := args.AsEnv()
-
-	require.True(t, slices.Contains(env, "CNI_NETNS_OVERRIDE=1"), "CNI_NETNS_OVERRIDE=1 should be in environment")
 }
 
 func newTestAllocator(t *testing.T, netConf *cnitypes.NetConf, cniBinPath string) *infraIPAllocator {
@@ -412,7 +415,7 @@ func TestAllocateIngressIPsWithDelegatedIPAM(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			alloc := newTestAllocatorWithFamilies(t, tt.netConf, "/opt/cni/bin", tt.enableIPv4, tt.enableIPv6)
-			err := alloc.allocateIngressIPsWithDelegatedIPAMExec(context.Background(), tt.exec)
+			err := alloc.allocateIngressIPsWithDelegatedIPAMExecAndNetNS(context.Background(), tt.exec, newFakeNetNS())
 			if tt.expectErr {
 				require.Error(t, err)
 				return
@@ -454,7 +457,7 @@ func TestAllocateIngressIPsWithDelegatedIPAM_CompensatingDELOnError(t *testing.T
 		execResult: makeCNIResult("10.0.0.1/24"),
 	}
 	alloc := newTestAllocatorWithFamilies(t, netConf, "/opt/cni/bin", true, true)
-	err := alloc.allocateIngressIPsWithDelegatedIPAMExec(context.Background(), exec)
+	err := alloc.allocateIngressIPsWithDelegatedIPAMExecAndNetNS(context.Background(), exec, newFakeNetNS())
 	require.Error(t, err)
 	require.Equal(t, []string{"ADD", "DEL"}, exec.commands,
 		"failed allocation must issue a compensating DEL to release the plugin lease")
@@ -562,7 +565,7 @@ func TestDeallocateIngressIPsWithDelegatedIPAM(t *testing.T) {
 			var buf strings.Builder
 			alloc.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-			alloc.deallocateIngressIPsWithDelegatedIPAMExec(context.Background(), tt.exec)
+			alloc.deallocateIngressIPsWithDelegatedIPAMExecAndNetNS(context.Background(), tt.exec, newFakeNetNS())
 
 			out := buf.String()
 			for _, want := range tt.wantWarnContains {
