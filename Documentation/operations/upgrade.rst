@@ -347,7 +347,7 @@ The following options have been introduced in this version of Cilium:
   but may change in future releases.
 
 * When ``ipam.mode=delegated-plugin`` is combined with ``gatewayAPI.enabled=true``,
-  the cilium-agent now allocates Gateway ingress IPs by exec'ing the configured
+  the cilium-agent now allocates Gateway ingress IPs by executing the configured
   IPAM plugin binary out of the host CNI bin directory. The new
   ``--delegated-ipam-cni-bin-path`` agent flag (default ``/host/opt/cni/bin``)
   controls where the agent looks for the binary, and the Helm chart automatically
