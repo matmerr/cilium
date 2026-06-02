@@ -427,6 +427,9 @@ jobs:
           #   IPAM plugin type for allocating gateway ingress IPs.
           # * gatewayAPI.enabled=true enables Gateway API support.
           # * kubeProxyReplacement=true is required for Gateway API.
+          # * extraHostPathMounts shares /var/lib/cni between cilium-agent and
+          #   cilium-cni so ingress IP and pod IPs draw from one host-local
+          #   state dir (avoids host-local in host context picking the agent's ingress IP).
           CILIUM_INSTALL_DEFAULTS="${{ steps.default_vars.outputs.cilium_install_defaults }} \
             --helm-set=ipam.mode=delegated-plugin \
             --helm-set=cni.customConf=true \
@@ -442,7 +445,12 @@ jobs:
             --helm-set=ipMasqAgent.enabled=true \
             --helm-set=kubeProxyReplacement=true \
             --helm-set=gatewayAPI.enabled=true \
-            --helm-set=l2announcements.enabled=true"
+            --helm-set=l2announcements.enabled=true \
+            --helm-set='extraHostPathMounts[0].name=host-cni-state' \
+            --helm-set='extraHostPathMounts[0].mountPath=/var/lib/cni' \
+            --helm-set='extraHostPathMounts[0].hostPath=/var/lib/cni' \
+            --helm-set='extraHostPathMounts[0].hostPathType=DirectoryOrCreate' \
+            --helm-set='extraHostPathMounts[0].mountPropagation=HostToContainer'"
 
           if [ "${{ matrix.ipFamily }}" = "dual" ]; then
             CILIUM_INSTALL_DEFAULTS="${CILIUM_INSTALL_DEFAULTS} \
