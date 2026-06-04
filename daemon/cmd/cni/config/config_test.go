@@ -22,18 +22,20 @@ func TestConfig(t *testing.T) {
 		{
 			name: "default",
 			expected: Config{
-				CNIChainingMode: "none",
-				CNILogFile:      "/var/run/cilium/cilium-cni.log",
+				CNIChainingMode:         "none",
+				CNILogFile:              "/var/run/cilium/cilium-cni.log",
+				DelegatedIPAMCNIBinPath: "/host/opt/cni/bin",
 			},
 		},
 		{
 			name:     "aws-cni chaining mode",
 			override: func(c *config) { c.CNIChainingMode = "aws-cni" },
 			expected: Config{
-				CNIChainingMode:    "aws-cni",
-				CNIChainingTarget:  "aws-cni",
-				CNIExternalRouting: true,
-				CNILogFile:         "/var/run/cilium/cilium-cni.log",
+				CNIChainingMode:         "aws-cni",
+				CNIChainingTarget:       "aws-cni",
+				CNIExternalRouting:      true,
+				CNILogFile:              "/var/run/cilium/cilium-cni.log",
+				DelegatedIPAMCNIBinPath: "/host/opt/cni/bin",
 			},
 		},
 		{
@@ -42,17 +44,19 @@ func TestConfig(t *testing.T) {
 				c.CNIChainingMode, c.CNIChainingTarget = "", "foo"
 			},
 			expected: Config{
-				CNIChainingMode:   "generic-veth",
-				CNIChainingTarget: "foo",
-				CNILogFile:        "/var/run/cilium/cilium-cni.log",
+				CNIChainingMode:         "generic-veth",
+				CNIChainingTarget:       "foo",
+				CNILogFile:              "/var/run/cilium/cilium-cni.log",
+				DelegatedIPAMCNIBinPath: "/host/opt/cni/bin",
 			},
 		},
 		{
 			name:     "empty chaining mode",
 			override: func(c *config) { c.CNIChainingMode = "" },
 			expected: Config{
-				CNIChainingMode: "none",
-				CNILogFile:      "/var/run/cilium/cilium-cni.log",
+				CNIChainingMode:         "none",
+				CNILogFile:              "/var/run/cilium/cilium-cni.log",
+				DelegatedIPAMCNIBinPath: "/host/opt/cni/bin",
 			},
 		},
 	}

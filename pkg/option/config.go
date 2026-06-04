@@ -296,6 +296,9 @@ const (
 	// EnableEnvoyConfig enables processing of CiliumClusterwideEnvoyConfig and CiliumEnvoyConfig CRDs
 	EnableEnvoyConfig = "enable-envoy-config"
 
+	// DelegatedIPAMCNIBinPath sets the CNI bin directory used for delegated IPAM plugin invocations.
+	DelegatedIPAMCNIBinPath = "delegated-ipam-cni-bin-path"
+
 	// IPMasqAgentConfigPath is the configuration file path
 	IPMasqAgentConfigPath = "ip-masq-agent-config-path"
 
@@ -3037,15 +3040,6 @@ func (c *DaemonConfig) checkIPAMDelegatedPlugin() error {
 		}
 		if c.EnableEndpointHealthChecking {
 			return fmt.Errorf("--%s must be disabled with --%s=%s", EnableEndpointHealthChecking, IPAM, ipamOption.IPAMDelegatedPlugin)
-		}
-		// Envoy config for Ingress and Gateway API requires cilium-agent to
-		// create an IP address specifically for differentiating envoy traffic,
-		// which is not directly possible with delegated IPAM. CFP-45607
-		// introduces a delegated IPAM path for this. The restriction is
-		// kept here and will be lifted in a later commit once the path is
-		// activated.
-		if c.EnableEnvoyConfig {
-			return fmt.Errorf("--%s must be disabled with --%s=%s", EnableEnvoyConfig, IPAM, ipamOption.IPAMDelegatedPlugin)
 		}
 	}
 	return nil
