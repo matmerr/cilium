@@ -77,12 +77,8 @@ func (c *cniConfigManager) ExternalRoutingEnabled() bool {
 
 // GetDelegatedIPAMCNIBinPath returns the path to the CNI bin directory
 // used for delegated IPAM plugin invocations.
-//
-// The path is hardcoded for now. A follow-up will expose it via the
-// --delegated-ipam-cni-bin-path agent flag once the delegated-IPAM
-// gateway-ingress code path is activated (CFP cilium/design-cfps#93).
 func (c *cniConfigManager) GetDelegatedIPAMCNIBinPath() string {
-	return "/host/opt/cni/bin"
+	return c.config.DelegatedIPAMCNIBinPath
 }
 
 // GetCustomNetConf returns the parsed custom CNI configuration, if provided
